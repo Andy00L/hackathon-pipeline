@@ -328,7 +328,7 @@ MISSING DOCS:
 
 The README is the single most important file. Follow this structure but adapt sections to the project type. Not every project needs every section. Skip sections that don't apply.
 
-```markdown
+````markdown
 # Project Name
 
 [1-2 sentences. What this is. What problem it solves. No superlatives.]
@@ -401,13 +401,13 @@ graph TD
 ## License
 
 [License name. Link to LICENSE file.]
-```
+````
 
 ### 4.2. ARCHITECTURE.md
 
 This is for developers who want to understand the internals. It must be thorough.
 
-```markdown
+````markdown
 # Architecture
 
 ## System Overview
@@ -490,7 +490,7 @@ stateDiagram-v2
 [Why things are built the way they are.
  What alternatives were considered.
  What the known limitations are.]
-```
+````
 
 ### 4.3. Sub-READMEs
 

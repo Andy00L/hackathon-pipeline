@@ -53,7 +53,7 @@ Le script detecte et installe automatiquement les outils manquants : git, curl, 
 ## Architecture
 
 ```mermaid
-graph TD
+flowchart TD
     subgraph "Pipeline (hackathon.sh)"
         A["auto_setup()"] --> B["interactive_config()"]
         B --> C["load_config()"]
