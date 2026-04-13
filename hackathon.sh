@@ -540,6 +540,7 @@ HOOK_EOF
   safeguards=$(cat <<SAFEGUARDS_EOF
 {
   "permissions": {
+    "defaultMode": "acceptEdits",
     "deny": [
       "Bash(gh repo delete *)",
       "Bash(gh repo archive *)",
@@ -555,19 +556,21 @@ HOOK_EOF
       "Bash(git push origin --force *)",
       "Bash(git reset --hard *)",
       "Bash(chmod 777 *)",
-      "Bash(chmod -R 777 *)"
+      "Bash(chmod -R 777 *)",
+      "Bash(mkfs.*)",
+      "Bash(dd if=*)"
     ],
     "allow": [
-      "Bash(gh repo create *)",
-      "Bash(gh repo view *)",
-      "Bash(git push origin *)",
-      "Bash(git remote add *)",
-      "Bash(git add *)",
-      "Bash(git commit *)",
-      "Bash(git log *)",
-      "Bash(git diff *)",
-      "Bash(git status *)",
-      "Bash(git tag *)"
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "MultiEdit",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "Agent"
     ]
   },
   "hooks": {
@@ -593,6 +596,7 @@ SAFEGUARDS_EOF
   if [[ -f "$settings_file" ]]; then
     local merged
     merged=$(jq --argjson sg "$safeguards" '
+      .permissions.defaultMode = $sg.permissions.defaultMode |
       .permissions.deny = ((.permissions.deny // []) + $sg.permissions.deny | unique) |
       .permissions.allow = ((.permissions.allow // []) + $sg.permissions.allow | unique) |
       .hooks.PreToolUse = $sg.hooks.PreToolUse |
@@ -639,27 +643,6 @@ CMDEOF
 
   # Lancer le script comme processus initial du tmux (pas de race condition)
   tmux new-session -d -s "$session_name" "$cmd_file"
-
-  # Auto-accepter le warning bypass permissions
-  local max_wait=30
-  local waited=0
-  log "INFO" "Attente du warning bypass permissions..."
-  while [[ $waited -lt $max_wait ]]; do
-    local pane_content
-    pane_content=$(tmux capture-pane -t "$session_name" -p 2>/dev/null || echo "")
-    if echo "$pane_content" | grep -q "Yes, I accept"; then
-      sleep 1
-      tmux send-keys -t "$session_name" Down Enter
-      sleep 1
-      log "INFO" "Warning bypass permissions auto-accepté"
-      break
-    fi
-    sleep 1
-    waited=$((waited + 1))
-  done
-  if [[ $waited -ge $max_wait ]]; then
-    log "WARN" "Timeout 30s en attendant le warning bypass permissions"
-  fi
 
   # Vérifier que Claude a bien démarré (pas un prompt bash)
   sleep 10
@@ -810,7 +793,7 @@ echo ""
 tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
 # Construire la commande Claude
-CLAUDE_CMD="claude --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --dangerously-skip-permissions"
+CLAUDE_CMD="claude --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT}"
 
 # Ajouter Telegram channel si configuré
 if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
