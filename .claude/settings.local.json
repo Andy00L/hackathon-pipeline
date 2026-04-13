@@ -5,7 +5,8 @@
       "Bash(bash -n hackathon.sh)",
       "Bash(bash -n lib/utils.sh)",
       "Bash(bash:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(wc:*)"
     ]
   }
 }
