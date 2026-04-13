@@ -623,23 +623,23 @@ launch_claude_in_tmux() {
   local project_dir="$3"
   local claude_cmd="$4"
 
-  # Écrire le prompt dans un fichier temporaire (évite les problèmes de quoting)
-  local prompt_file
-  prompt_file=$(mktemp /tmp/hackathon-prompt-XXXXXX.txt)
-  printf '%s' "$prompt" > "$prompt_file"
-
-  # Écrire le script de lancement
+  # Écrire le script de lancement avec prompt en heredoc
+  # Le heredoc 'PROMPT_EOF' (single-quoted) empêche toute expansion bash
+  # dans le contenu du prompt — parenthèses, $, etc. sont inertes
   local cmd_file
   cmd_file=$(mktemp /tmp/hackathon-cmd-XXXXXX.sh)
   chmod +x "$cmd_file"
-  cat > "$cmd_file" <<CMDEOF
+  {
+    cat <<CMDEOF
 #!/bin/bash
-PROMPT=\$(cat "${prompt_file}")
-rm -f "\$0" "${prompt_file}"
+rm -f "\$0"
 cd "${project_dir}"
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
-exec ${claude_cmd} "\$PROMPT"
+exec ${claude_cmd} <<'PROMPT_EOF'
 CMDEOF
+    printf '%s\n' "$prompt"
+    echo "PROMPT_EOF"
+  } > "$cmd_file"
 
   # Lancer le script comme processus initial du tmux (pas de race condition)
   tmux new-session -d -s "$session_name" "$cmd_file"
@@ -800,33 +800,18 @@ if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
   CLAUDE_CMD+=" --channels plugin:telegram@claude-plugins-official"
 fi
 
-# Créer le prompt initial
+# Créer le prompt initial — PAS de parenthèses ni de caractères spéciaux bash
 INITIAL_PROMPT='Lis CLAUDE.md attentivement.
+Tu es le Lead du hackathon. Commence MAINTENANT.
+1. Phase de recherche competitive via WebSearch et WebFetch, sauvegarde dans docs/COMPETITIVE-ANALYSIS.md
+2. Si docs/PLAN.md existe, utilise-le comme base. Sinon, cree ton propre plan dans docs/PLAN.md.
+3. Cree ton equipe de 4 teammates - Architecte, Implementeur, Securite, Qualite. Fichiers agents dans .claude/agents/.
+4. Coordonne le travail. Itere sans limite. Objectif score qualite 45/50 minimum et securite PASS.
+5. Quand le consensus est atteint, tag, zip, notifie.
+La qualite est la SEULE priorite. Pas de compromis.'
 
-Tu es le Lead du hackathon. Commence MAINTENANT :
-
-1. Phase de recherche compétitive (WebSearch + WebFetch)
-   Sauvegarde dans docs/COMPETITIVE-ANALYSIS.md
-
-2. Si docs/PLAN.md existe (de ultraplan), utilise-le comme base.
-   Sinon, crée ton propre plan dans docs/PLAN.md.
-
-3. Crée ton équipe de 4 teammates :
-   - Architecte (valide les choix techniques)
-   - Implémenteur (code production-quality)
-   - Sécurité (audit continu)
-   - Qualité (évaluation /50)
-   Les fichiers agents sont dans .claude/agents/.
-
-4. Coordonne le travail. Itère sans limite.
-   Objectif : score qualité >= 45/50 + sécurité PASS.
-
-5. Quand le consensus est atteint : tag, zip, notifie.
-
-La qualité est la SEULE priorité. Pas de compromis.'
-
-# Prompt de relance (utilisé par le watchdog si la session crash)
-RESTART_PROMPT='La session précédente a été interrompue. Lis CLAUDE.md et docs/ pour comprendre l'\''état actuel. Vérifie le git log. Reprends où tu en étais. Continue jusqu'\''au consensus READY + PASS.'
+# Prompt de relance — utilisé par le watchdog si la session crash
+RESTART_PROMPT='Session interrompue. Lis CLAUDE.md et docs/ pour comprendre le contexte. Verifie git log. Reprends le travail. Continue sans limite.'
 
 # Lancer Claude dans tmux (avec retry si échec de démarrage)
 launch_attempts=0
