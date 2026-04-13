@@ -6,7 +6,8 @@ set -euo pipefail
 # Usage :
 #   ./hackathon.sh                  Lance le pipeline complet
 #   ./hackathon.sh --skip-ultraplan Skip ultraplan, direct Agent Teams
-#   ./hackathon.sh --attach         Attach à la session tmux existante
+#   ./hackathon.sh --attach         Attach à la session tmux (no setup)
+#   ./hackathon.sh --watch          Show filtered live logs (no setup)
 #
 # Au premier lancement, auto_setup() installe automatiquement tous les
 # prérequis : outils système, GitHub CLI, plugins Claude Code, NOPASSWD sudo.
@@ -25,6 +26,63 @@ for _required_file in "${SCRIPT_DIR}/lib/utils.sh" "${SCRIPT_DIR}/lib/telegram.s
   fi
 done
 unset _required_file
+
+# ── Parse des arguments (AVANT tout setup) ──────────────────────────────────
+SKIP_ULTRAPLAN=false
+WATCH_MODE=false
+ATTACH_MODE=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --skip-ultraplan) SKIP_ULTRAPLAN=true ;;
+    --watch)          WATCH_MODE=true ;;
+    --attach)         ATTACH_MODE=true ;;
+    --help|-h)
+      echo "Usage: ./hackathon.sh [options]"
+      echo ""
+      echo "Options:"
+      echo "  --skip-ultraplan  Skip ultraplan, agents create their own plan"
+      echo "  --watch           Show filtered live logs (no setup)"
+      echo "  --attach          Attach to tmux session (no setup)"
+      echo "  --help            Show this help"
+      exit 0
+      ;;
+    *)
+      echo "Option inconnue: $arg"
+      echo "Usage: ./hackathon.sh [--skip-ultraplan] [--watch] [--attach] [--help]"
+      exit 1
+      ;;
+  esac
+done
+
+# ── Mode watch : juste les logs, pas de setup ───────────────────────────────
+if [[ "$WATCH_MODE" == "true" ]]; then
+  if [[ -f "${SCRIPT_DIR}/hackathon.conf" ]]; then
+    source "${SCRIPT_DIR}/hackathon.conf"
+  fi
+  LIVE_LOG="${PROJECT_DIR:-.}/.pipeline-live.log"
+  if [[ ! -f "$LIVE_LOG" ]]; then
+    echo "Pas de session active. Lance d'abord ./hackathon.sh"
+    exit 1
+  fi
+  echo "Watch mode : $LIVE_LOG"
+  echo "Ctrl+C pour quitter (la session continue)"
+  tail -f "$LIVE_LOG" | grep --line-buffered -iE \
+    "phase|commit|error|warn|score|pass|fail|ready|human|deploy|push|✓|✗" \
+    || true
+  exit 0
+fi
+
+# ── Mode attach : juste tmux, pas de setup ──────────────────────────────────
+if [[ "$ATTACH_MODE" == "true" ]]; then
+  if tmux has-session -t hackathon 2>/dev/null; then
+    tmux attach -t hackathon
+  else
+    echo "Pas de session tmux 'hackathon' active."
+    echo "Lance d'abord ./hackathon.sh"
+  fi
+  exit 0
+fi
 
 # ── Auto-setup : installation automatique des prérequis ─────────────────────
 # Idempotent : vérifie ce qui est déjà installé et n'installe que le manquant.
@@ -561,38 +619,6 @@ trap _cleanup EXIT
 # ── Lancer auto_setup avant tout le reste ───────────────────────────────────
 auto_setup
 
-# ── Parse des arguments ──────────────────────────────────────────────────────
-SKIP_ULTRAPLAN=false
-ATTACH_ONLY=false
-WATCH_MODE=false
-
-for arg in "$@"; do
-  case "$arg" in
-    --skip-ultraplan) SKIP_ULTRAPLAN=true ;;
-    --attach)         ATTACH_ONLY=true ;;
-    --watch)          WATCH_MODE=true ;;
-    --help|-h)
-      echo "Usage: $0 [--skip-ultraplan] [--attach] [--watch]"
-      echo ""
-      echo "  --skip-ultraplan  Saute la phase ultraplan (si plan déjà fait)"
-      echo "  --attach          Attach à la session tmux existante"
-      echo "  --watch           Affiche les logs en temps réel (filtré)"
-      exit 0
-      ;;
-  esac
-done
-
-# ── Attach mode ──────────────────────────────────────────────────────────────
-if [[ "$ATTACH_ONLY" == "true" ]]; then
-  if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    tmux attach -t "$TMUX_SESSION"
-  else
-    echo "Aucune session tmux '${TMUX_SESSION}' active."
-    exit 1
-  fi
-  exit 0
-fi
-
 # ── Configuration interactive (si nécessaire) ────────────────────────────────
 interactive_config
 
@@ -754,8 +780,23 @@ tmux new-session -d -s "$TMUX_SESSION" -c "$PROJECT_DIR"
 # Envoyer la commande Claude dans tmux
 tmux send-keys -t "$TMUX_SESSION" "export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 && ${CLAUDE_CMD}" Enter
 
-# Attendre que Claude démarre (le prompt interactif)
-sleep 8
+# Auto-accepter le warning bypass permissions (poll robuste)
+max_wait=30
+waited=0
+while [[ $waited -lt $max_wait ]]; do
+  if tmux capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -q "Yes, I accept"; then
+    tmux send-keys -t "$TMUX_SESSION" Down Enter
+    log "INFO" "Warning bypass permissions auto-accepté"
+    break
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
+if [[ $waited -ge $max_wait ]]; then
+  log "WARN" "Timeout en attendant le warning bypass permissions"
+fi
+
+sleep 2
 
 # Envoyer le prompt initial
 tmux send-keys -t "$TMUX_SESSION" "$INITIAL_PROMPT" Enter
@@ -783,17 +824,6 @@ echo "  La session continue même si tu fermes ce terminal."
 echo "  Claude itère sans limite jusqu'au consensus."
 echo "════════════════════════════════════════════════════"
 echo ""
-
-# Mode watch : afficher les logs filtrés en temps réel
-if [[ "$WATCH_MODE" == "true" ]]; then
-  echo "Mode watch activé. Ctrl+C pour quitter (la session tmux continue)."
-  echo ""
-  tail -f "${LIVE_LOG}" 2>/dev/null \
-    | grep --line-buffered -iE \
-      "feat:|fix:|test:|docs:|PASS|FAIL|READY|NOT READY|score|HUMAN_INPUT|error|warning|✓|✗|commit|phase|terminé|launched|relancé" \
-    || true
-  exit 0
-fi
 
 # ── Boucle de surveillance (optionnelle) ─────────────────────────────────────
 # Vérifie que la session tmux est toujours vivante
@@ -831,7 +861,24 @@ while true; do
 
     tmux new-session -d -s "$TMUX_SESSION" -c "$PROJECT_DIR"
     tmux send-keys -t "$TMUX_SESSION" "export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 && ${CLAUDE_CMD}" Enter
-    sleep 8
+
+    # Auto-accepter le warning bypass permissions (poll robuste)
+    max_wait=30
+    waited=0
+    while [[ $waited -lt $max_wait ]]; do
+      if tmux capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -q "Yes, I accept"; then
+        tmux send-keys -t "$TMUX_SESSION" Down Enter
+        log "INFO" "Warning bypass permissions auto-accepté (restart)"
+        break
+      fi
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if [[ $waited -ge $max_wait ]]; then
+      log "WARN" "Timeout en attendant le warning bypass permissions (restart)"
+    fi
+
+    sleep 2
     tmux send-keys -t "$TMUX_SESSION" "La session précédente a été interrompue. Lis CLAUDE.md et docs/ pour comprendre l'état actuel. Vérifie le git log. Reprends où tu en étais. Continue jusqu'au consensus READY + PASS." Enter
 
     log "INFO" "Session relancée"
