@@ -1,5 +1,7 @@
 hackathon.conf
 *.log
+logs/
+.pipeline.lock
 .ultraplan-done
 .DS_Store
 *.swp

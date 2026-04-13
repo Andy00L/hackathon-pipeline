@@ -261,23 +261,13 @@ interactive_config() {
   # Protection : le projet ne doit PAS être dans le dossier pipeline
   while true; do
     local project_resolved
-    if [[ -d "$PROJECT_DIR" ]]; then
-      project_resolved=$(cd "$PROJECT_DIR" && pwd)
-    else
-      mkdir -p "$PROJECT_DIR" 2>/dev/null
-      if [[ -d "$PROJECT_DIR" ]]; then
-        project_resolved=$(cd "$PROJECT_DIR" && pwd)
-        rmdir "$PROJECT_DIR" 2>/dev/null || true
-      else
-        echo "  Impossible de créer $PROJECT_DIR. Utilisation du défaut."
-        PROJECT_DIR="$default_project"
-        mkdir -p "$PROJECT_DIR" 2>/dev/null
-        project_resolved=$(cd "$PROJECT_DIR" && pwd)
-        rmdir "$PROJECT_DIR" 2>/dev/null || true
-      fi
+    project_resolved=$(realpath -m "$PROJECT_DIR" 2>/dev/null)
+    if [[ -z "$project_resolved" ]]; then
+      project_resolved=$(readlink -f "$PROJECT_DIR" 2>/dev/null || echo "$PROJECT_DIR")
     fi
 
-    if [[ "$project_resolved" == "$SCRIPT_DIR" || "$project_resolved" == "$SCRIPT_DIR"/* ]]; then
+    if [[ "$project_resolved" == "$SCRIPT_DIR" ]] || \
+       [[ "$project_resolved" == "$SCRIPT_DIR/"* ]]; then
       echo ""
       echo "  Le projet ne peut pas être dans le dossier de la pipeline."
       echo "  Pipeline : $SCRIPT_DIR"
@@ -456,10 +446,40 @@ CONF
 # ────────────────────────────────────────────────────────────────────────────
 setup_safeguards() {
   local settings_file="${PROJECT_DIR}/.claude/settings.json"
-  mkdir -p "${PROJECT_DIR}/.claude"
+  local hook_dir="${PROJECT_DIR}/.claude/hooks"
+  local hook_script="${hook_dir}/pretooluse-safeguard.sh"
+  mkdir -p "$hook_dir"
+
+  # Create the hook script (always valid JSON output, always exit 0)
+  cat > "$hook_script" << 'HOOK_EOF'
+#!/bin/bash
+INPUT=$(cat)
+CMD=$(echo "$INPUT" | grep -oP '"command"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"command"\s*:\s*"//;s/"$//' 2>/dev/null || echo "")
+
+if [[ -z "$CMD" ]]; then
+  echo '{"result":"allow"}'
+  exit 0
+fi
+
+# Patterns dangereux
+if echo "$CMD" | grep -qiE '(rm\s+-rf\s+[/~]|git\s+push\s+--force|git\s+reset\s+--hard|chmod\s+777|>\s*/dev/sd|mkfs\.|dd\s+if=)'; then
+  echo '{"result":"deny","reason":"Commande bloquée par safeguard"}'
+  exit 0
+fi
+
+# Accès Windows filesystem
+if echo "$CMD" | grep -qE '/mnt/[a-z]/'; then
+  echo '{"result":"deny","reason":"Accès Windows filesystem bloqué"}'
+  exit 0
+fi
+
+echo '{"result":"allow"}'
+exit 0
+HOOK_EOF
+  chmod +x "$hook_script"
 
   local safeguards
-  safeguards=$(cat <<'SAFEGUARDS_EOF'
+  safeguards=$(cat <<SAFEGUARDS_EOF
 {
   "permissions": {
     "deny": [
@@ -499,7 +519,7 @@ setup_safeguards() {
         "hooks": [
           {
             "type": "command",
-            "command": "INPUT=$(cat); CMD=$(echo \"$INPUT\" | jq -r '.input.command // empty' 2>/dev/null); if echo \"$CMD\" | grep -qiE 'gh repo (delete|archive|edit)|git push.*--force|git reset --hard|rm -rf /|rm -rf ~|rm -rf \\.|rm -r -f|chmod (-R )?777|/mnt/[a-z]/'; then echo '{\"decision\": \"block\", \"reason\": \"Commande bloquée par safeguard hackathon\"}'; else echo '{\"decision\": \"allow\"}'; fi"
+            "command": "${hook_script}"
           }
         ]
       }
@@ -513,7 +533,6 @@ SAFEGUARDS_EOF
 )
 
   if [[ -f "$settings_file" ]]; then
-    # Merge intelligent : union deny/allow, remplacer hooks, fusionner env
     local merged
     merged=$(jq --argjson sg "$safeguards" '
       .permissions.deny = ((.permissions.deny // []) + $sg.permissions.deny | unique) |
@@ -535,11 +554,7 @@ source "${SCRIPT_DIR}/lib/telegram.sh"
 
 # ── Cleanup trap ─────────────────────────────────────────────────────────────
 _cleanup() {
-  # Kill any background Telegram polling processes we spawned
-  if [[ -n "${TG_WAIT_PID:-}" ]]; then
-    kill "$TG_WAIT_PID" 2>/dev/null || true
-    wait "$TG_WAIT_PID" 2>/dev/null || true
-  fi
+  rm -f "${LOCK_FILE:-}" 2>/dev/null || true
 }
 trap _cleanup EXIT
 
@@ -586,6 +601,35 @@ load_config "${SCRIPT_DIR}/hackathon.conf"
 check_prereqs
 tg_init
 
+# ── Logging setup ───────────────────────────────────────────────────────────
+log_slug=$(echo "$HACKATHON_NAME" | sed -E 's/[^a-zA-Z0-9]+/-/g' | sed -E 's/^-+|-+$//g' | tr '[:upper:]' '[:lower:]')
+log_slug="${log_slug:-unknown}"
+LOG_DIR="${SCRIPT_DIR}/logs/${log_slug}"
+mkdir -p "$LOG_DIR"
+
+PIPELINE_LOG="$LOG_DIR/pipeline.log"
+CLAUDE_LOG="$LOG_DIR/claude-output.log"
+EVENTS_LOG="$LOG_DIR/events.log"
+
+exec > >(tee -a "$PIPELINE_LOG") 2>&1
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') | PIPELINE_START | $HACKATHON_NAME" >> "$EVENTS_LOG"
+
+# ── Lock file ───────────────────────────────────────────────────────────────
+LOCK_FILE="${PROJECT_DIR}/.pipeline.lock"
+if [[ -f "$LOCK_FILE" ]]; then
+  lock_pid=$(cat "$LOCK_FILE" 2>/dev/null)
+  if kill -0 "$lock_pid" 2>/dev/null; then
+    log "WARN" "Une autre session pipeline est active (PID: ${lock_pid})"
+    log "WARN" "Supprime ${LOCK_FILE} si c'est une erreur."
+    exit 1
+  else
+    log "WARN" "Lock file obsolète (PID: ${lock_pid}). Suppression."
+    rm -f "$LOCK_FILE"
+  fi
+fi
+echo $$ > "$LOCK_FILE"
+
 echo ""
 echo "════════════════════════════════════════════════════"
 echo "  Pipeline hackathon : ${HACKATHON_NAME}"
@@ -614,7 +658,9 @@ tg_send "$(printf '🚀 *Pipeline hackathon lancé*\nProjet : `%s`\nDossier : `%
   "$HACKATHON_NAME" "$PROJECT_DIR")"
 
 # ── Phase 1 : Ultraplan ─────────────────────────────────────────────────────
-if [[ "$SKIP_ULTRAPLAN" != "true" ]]; then
+if [[ "$SKIP_ULTRAPLAN" == "true" ]]; then
+  log "INFO" "Ultraplan skipped"
+else
   echo ""
   echo "════════════════════════════════════════════════════"
   echo "  ÉTAPE 1 : ULTRAPLAN"
@@ -635,39 +681,27 @@ if [[ "$SKIP_ULTRAPLAN" != "true" ]]; then
   echo "  Le plan sera sauvegardé dans docs/PLAN.md."
   echo ""
 
-  tg_send "$(printf '📋 *Ultraplan requis*\nOuvre un terminal et lance :\n`cd %s && claude`\nPuis tape : `/ultraplan Lis CLAUDE.md`\nRéponds "ok" ici quand le plan est approuvé.' \
-    "$PROJECT_DIR")"
-
-  # Attendre confirmation
   if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
-    echo "  En attente de ta confirmation sur Telegram..."
-    echo "  (ou appuie sur Entrée ici quand ultraplan est approuvé)"
-    # Polling Telegram en background pendant qu'on attend aussi Entrée
-    (
-      response=$(tg_ask "Ultraplan approuvé ? Réponds 'ok' quand c'est fait." 7200)
-      if [[ -n "$response" ]]; then
-        touch "${PROJECT_DIR}/.ultraplan-done"
-      fi
-    ) &
-    TG_WAIT_PID=$!
-
-    # Attendre soit Entrée soit le fichier marker
-    while true; do
-      if [[ -f "${PROJECT_DIR}/.ultraplan-done" ]]; then
-        rm -f "${PROJECT_DIR}/.ultraplan-done"
-        kill "$TG_WAIT_PID" 2>/dev/null || true
-        break
-      fi
-      if read -t 2 -r; then
-        kill "$TG_WAIT_PID" 2>/dev/null || true
+    tg_send "$(printf '📋 *Ultraplan requis*\nOuvre un terminal et lance :\n`cd %s && claude`\nPuis tape : `/ultraplan Lis CLAUDE.md`\nRéponds "ok" ici quand le plan est approuvé.' \
+      "$PROJECT_DIR")"
+    tg_ask "Ultraplan approuvé ? Réponds 'ok' quand c'est fait." 7200 || true
+    log "INFO" "Ultraplan approuvé via Telegram"
+  else
+    log "INFO" "En attente de docs/PLAN.md (lance /ultraplan dans un autre terminal)"
+    wait_count=0
+    while [[ ! -f "$PROJECT_DIR/docs/PLAN.md" ]]; do
+      sleep 5
+      wait_count=$((wait_count + 1))
+      if [[ $wait_count -ge 720 ]]; then
+        log "WARN" "Timeout 60min. Continuation sans plan."
         break
       fi
     done
-  else
-    read -rp "  Appuie sur Entrée quand ultraplan est approuvé..."
+    if [[ -f "$PROJECT_DIR/docs/PLAN.md" ]]; then
+      log "INFO" "PLAN.md détecté. Ultraplan approuvé."
+    fi
   fi
 
-  log "INFO" "Ultraplan approuvé"
   git_checkpoint "ultraplan approuvé"
 fi
 
@@ -682,15 +716,12 @@ echo ""
 tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
 # Construire la commande Claude
-CLAUDE_CMD="claude --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT}"
+CLAUDE_CMD="claude --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --dangerously-skip-permissions"
 
 # Ajouter Telegram channel si configuré
 if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
   CLAUDE_CMD+=" --channels plugin:telegram@claude-plugins-official"
 fi
-
-# Permission mode
-CLAUDE_CMD+=" --permission-mode acceptEdits"
 
 # Créer le prompt initial
 INITIAL_PROMPT='Lis CLAUDE.md attentivement.
@@ -732,7 +763,7 @@ tmux send-keys -t "$TMUX_SESSION" "$INITIAL_PROMPT" Enter
 # Activer le logging temps réel de la session tmux
 LIVE_LOG="${PROJECT_DIR}/.pipeline-live.log"
 : > "$LIVE_LOG"
-tmux pipe-pane -t "$TMUX_SESSION" -o "cat >> ${LIVE_LOG}"
+tmux pipe-pane -t "$TMUX_SESSION" -o "tee -a ${CLAUDE_LOG} >> ${LIVE_LOG}"
 log "INFO" "Logging temps réel activé : ${LIVE_LOG}"
 
 log "INFO" "Agent Teams lancé dans tmux session '${TMUX_SESSION}'"

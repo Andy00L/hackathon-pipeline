@@ -6,14 +6,20 @@
 # ── Logging ─────────────────────────────────────────────────────────────────
 log() {
   local level="$1"
-  local message="$2"
+  shift
+  local msg="$*"
   local timestamp
   timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-  echo "[${timestamp}] [${level}] ${message}"
+  echo "[${timestamp}] [${level}] ${msg}"
 
-  # Append to log file if PROJECT_DIR is set
+  # Append to project log file if PROJECT_DIR is set
   if [[ -n "${PROJECT_DIR:-}" && -d "${PROJECT_DIR}" ]]; then
-    echo "[${timestamp}] [${level}] ${message}" >> "${PROJECT_DIR}/.pipeline.log" 2>/dev/null || true
+    echo "[${timestamp}] [${level}] ${msg}" >> "${PROJECT_DIR}/.pipeline.log" 2>/dev/null || true
+  fi
+
+  # Append to structured events log if available
+  if [[ -n "${EVENTS_LOG:-}" ]]; then
+    echo "${timestamp} | ${level} | ${msg}" >> "$EVENTS_LOG" 2>/dev/null || true
   fi
 }
 
@@ -107,6 +113,7 @@ target/
 *.log
 .pipeline.log
 .pipeline-live.log
+.pipeline.lock
 .ultraplan-done
 .DS_Store
 .claude-stderr.log
