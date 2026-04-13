@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /home/drew/pipeline_hack/*.sh /home/drew/pipeline_hack/lib/*.sh)",
+      "Bash(bash -n hackathon.sh)",
+      "Bash(bash -n lib/utils.sh)",
+      "Bash(bash:*)",
+      "Bash(grep:*)"
+    ]
+  }
+}

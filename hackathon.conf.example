@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# ============================================================================
+# hackathon.conf — Configuration du pipeline hackathon
+#
+# INSTRUCTIONS :
+#   1. Copie hackathon.conf.example vers hackathon.conf
+#   2. Remplis les champs obligatoires
+#   3. Lance ./hackathon.sh
+# ============================================================================
+
+# ── Hackathon ────────────────────────────────────────────────────────────────
+# Obligatoire : le nom et la deadline
+HACKATHON_NAME=""
+HACKATHON_DEADLINE=""          # Format ISO : 2026-04-20T23:59:00
+HACKATHON_THEME=""             # Thème imposé (vide si libre)
+
+# ── Projet ───────────────────────────────────────────────────────────────────
+# Répertoire où le code du hackathon sera généré
+# Par défaut : ~/hackathons/hackathon-project
+PROJECT_DIR="${PROJECT_DIR:-$HOME/hackathons/hackathon-project}"
+
+# ── GitHub ───────────────────────────────────────────────────────────────────
+# Si vide, le pipeline crée un repo via gh repo create
+# Si rempli, le pipeline clone ce repo
+GITHUB_REPO=""                 # Ex: "monuser/hackathon-2026"
+GITHUB_VISIBILITY="public"    # public | private
+
+# ── Telegram (recommandé) ───────────────────────────────────────────────────
+# Créé via @BotFather sur Telegram
+# Sans Telegram, le pipeline fonctionne mais ne peut pas te notifier
+TELEGRAM_BOT_TOKEN=""
+TELEGRAM_CHAT_ID=""
+
+# ── Modèle ───────────────────────────────────────────────────────────────────
+# Ne change pas sauf si tu sais ce que tu fais
+CLAUDE_MODEL="opus"
+CLAUDE_EFFORT="max"
+CLAUDE_FALLBACK="sonnet"
