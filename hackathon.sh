@@ -606,6 +606,73 @@ SAFEGUARDS_EOF
   log "INFO" "Safeguards GitHub configurés"
 }
 
+# ── Lancer Claude dans tmux (sans race condition) ───────────────────────────
+# Crée un script temporaire pour lancer Claude comme processus initial de tmux
+# au lieu de new-session + send-keys. Résout les race conditions documentées
+# dans les GitHub issues #40168, #33987, #37217.
+# Usage : launch_claude_in_tmux "prompt" "session_name" "project_dir" "claude_cmd"
+# Retourne 0 si Claude démarre, 1 sinon.
+# ────────────────────────────────────────────────────────────────────────────
+launch_claude_in_tmux() {
+  local prompt="$1"
+  local session_name="$2"
+  local project_dir="$3"
+  local claude_cmd="$4"
+
+  # Écrire le prompt dans un fichier temporaire (évite les problèmes de quoting)
+  local prompt_file
+  prompt_file=$(mktemp /tmp/hackathon-prompt-XXXXXX.txt)
+  printf '%s' "$prompt" > "$prompt_file"
+
+  # Écrire le script de lancement
+  local cmd_file
+  cmd_file=$(mktemp /tmp/hackathon-cmd-XXXXXX.sh)
+  chmod +x "$cmd_file"
+  cat > "$cmd_file" <<CMDEOF
+#!/bin/bash
+PROMPT=\$(cat "${prompt_file}")
+rm -f "\$0" "${prompt_file}"
+cd "${project_dir}"
+export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+exec ${claude_cmd} "\$PROMPT"
+CMDEOF
+
+  # Lancer le script comme processus initial du tmux (pas de race condition)
+  tmux new-session -d -s "$session_name" "$cmd_file"
+
+  # Auto-accepter le warning bypass permissions
+  local max_wait=30
+  local waited=0
+  log "INFO" "Attente du warning bypass permissions..."
+  while [[ $waited -lt $max_wait ]]; do
+    local pane_content
+    pane_content=$(tmux capture-pane -t "$session_name" -p 2>/dev/null || echo "")
+    if echo "$pane_content" | grep -q "Yes, I accept"; then
+      sleep 1
+      tmux send-keys -t "$session_name" Down Enter
+      sleep 1
+      log "INFO" "Warning bypass permissions auto-accepté"
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [[ $waited -ge $max_wait ]]; then
+    log "WARN" "Timeout 30s en attendant le warning bypass permissions"
+  fi
+
+  # Vérifier que Claude a bien démarré (pas un prompt bash)
+  sleep 10
+  local verify_content
+  verify_content=$(tmux capture-pane -t "$session_name" -p 2>/dev/null || echo "")
+  if echo "$verify_content" | grep -qE '(drew@|bash-[0-9]|\$\s*$)'; then
+    log "ERROR" "Claude Code n'a pas démarré. Prompt bash détecté."
+    return 1
+  fi
+  log "INFO" "Claude Code vérifié : en cours d'exécution"
+  return 0
+}
+
 # ── Charger les bibliothèques ────────────────────────────────────────────────
 source "${SCRIPT_DIR}/lib/utils.sh"
 source "${SCRIPT_DIR}/lib/telegram.sh"
@@ -613,6 +680,7 @@ source "${SCRIPT_DIR}/lib/telegram.sh"
 # ── Cleanup trap ─────────────────────────────────────────────────────────────
 _cleanup() {
   rm -f "${LOCK_FILE:-}" 2>/dev/null || true
+  rm -f /tmp/hackathon-cmd-*.sh /tmp/hackathon-prompt-*.txt 2>/dev/null || true
 }
 trap _cleanup EXIT
 
@@ -774,32 +842,22 @@ Tu es le Lead du hackathon. Commence MAINTENANT :
 
 La qualité est la SEULE priorité. Pas de compromis.'
 
-# Lancer la session tmux
-tmux new-session -d -s "$TMUX_SESSION" -c "$PROJECT_DIR"
+# Prompt de relance (utilisé par le watchdog si la session crash)
+RESTART_PROMPT='La session précédente a été interrompue. Lis CLAUDE.md et docs/ pour comprendre l'\''état actuel. Vérifie le git log. Reprends où tu en étais. Continue jusqu'\''au consensus READY + PASS.'
 
-# Envoyer la commande Claude dans tmux
-tmux send-keys -t "$TMUX_SESSION" "export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 && ${CLAUDE_CMD}" Enter
-
-# Auto-accepter le warning bypass permissions (poll robuste)
-max_wait=30
-waited=0
-while [[ $waited -lt $max_wait ]]; do
-  if tmux capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -q "Yes, I accept"; then
-    tmux send-keys -t "$TMUX_SESSION" Down Enter
-    log "INFO" "Warning bypass permissions auto-accepté"
-    break
+# Lancer Claude dans tmux (avec retry si échec de démarrage)
+launch_attempts=0
+while ! launch_claude_in_tmux "$INITIAL_PROMPT" "$TMUX_SESSION" "$PROJECT_DIR" "$CLAUDE_CMD"; do
+  launch_attempts=$((launch_attempts + 1))
+  if (( launch_attempts >= 3 )); then
+    log "ERROR" "Claude n'a pas démarré après 3 tentatives. Abandon."
+    tg_send "❌ Claude n'a pas pu démarrer après 3 tentatives."
+    exit 1
   fi
-  sleep 1
-  waited=$((waited + 1))
+  log "WARN" "Claude n'a pas démarré. Retry ${launch_attempts}/3..."
+  tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  sleep 5
 done
-if [[ $waited -ge $max_wait ]]; then
-  log "WARN" "Timeout en attendant le warning bypass permissions"
-fi
-
-sleep 2
-
-# Envoyer le prompt initial
-tmux send-keys -t "$TMUX_SESSION" "$INITIAL_PROMPT" Enter
 
 # Activer le logging temps réel de la session tmux
 LIVE_LOG="${PROJECT_DIR}/.pipeline-live.log"
@@ -859,30 +917,15 @@ while true; do
     log "WARN" "Relance de la session (tentative ${restart_count}, prochain check dans ${sleep_interval}s)..."
     tg_send "⚠️ Session interrompue. Relance automatique..."
 
-    tmux new-session -d -s "$TMUX_SESSION" -c "$PROJECT_DIR"
-    tmux send-keys -t "$TMUX_SESSION" "export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 && ${CLAUDE_CMD}" Enter
-
-    # Auto-accepter le warning bypass permissions (poll robuste)
-    max_wait=30
-    waited=0
-    while [[ $waited -lt $max_wait ]]; do
-      if tmux capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -q "Yes, I accept"; then
-        tmux send-keys -t "$TMUX_SESSION" Down Enter
-        log "INFO" "Warning bypass permissions auto-accepté (restart)"
-        break
-      fi
-      sleep 1
-      waited=$((waited + 1))
-    done
-    if [[ $waited -ge $max_wait ]]; then
-      log "WARN" "Timeout en attendant le warning bypass permissions (restart)"
+    if launch_claude_in_tmux "$RESTART_PROMPT" "$TMUX_SESSION" "$PROJECT_DIR" "$CLAUDE_CMD"; then
+      tmux pipe-pane -t "$TMUX_SESSION" -o "tee -a ${CLAUDE_LOG} >> ${LIVE_LOG}"
+      log "INFO" "Session relancée"
+      tg_send "🔄 Session relancée avec succès"
+    else
+      log "ERROR" "Claude n'a pas démarré après relance. Retry au prochain cycle."
+      tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+      tg_send "❌ Claude n'a pas pu redémarrer. Retry au prochain cycle."
     fi
-
-    sleep 2
-    tmux send-keys -t "$TMUX_SESSION" "La session précédente a été interrompue. Lis CLAUDE.md et docs/ pour comprendre l'état actuel. Vérifie le git log. Reprends où tu en étais. Continue jusqu'au consensus READY + PASS." Enter
-
-    log "INFO" "Session relancée"
-    tg_send "🔄 Session relancée avec succès"
     last_restart_ts=$(date +%s)
   else
     # Session vivante — réinitialiser après 5+ min de stabilité
