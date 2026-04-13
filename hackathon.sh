@@ -16,6 +16,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMUX_SESSION="hackathon"
 
+# ── Vérifier que les fichiers lib/ existent avant toute modification système ──
+for _required_file in "${SCRIPT_DIR}/lib/utils.sh" "${SCRIPT_DIR}/lib/telegram.sh"; do
+  if [[ ! -f "$_required_file" ]]; then
+    echo "ERREUR : fichier requis manquant : ${_required_file}"
+    echo "Le pipeline ne peut pas démarrer sans les fichiers lib/."
+    exit 1
+  fi
+done
+unset _required_file
+
 # ── Auto-setup : installation automatique des prérequis ─────────────────────
 # Idempotent : vérifie ce qui est déjà installé et n'installe que le manquant.
 # Les commandes sudo promptent le mot de passe dans le terminal tant que
@@ -114,11 +124,13 @@ auto_setup() {
   echo "[5/6] NOPASSWD sudo..."
 
   if ! sudo -n true 2>/dev/null; then
-    echo "  → Configuration de NOPASSWD sudo..."
+    echo "  → Configuration de NOPASSWD sudo (apt-get seulement)..."
     echo "    (dernière fois qu'un mot de passe sudo sera demandé)"
-    echo "$(whoami) ALL=(ALL) NOPASSWD: ALL" | sudo tee "/etc/sudoers.d/$(whoami)" > /dev/null
-    sudo chmod 0440 "/etc/sudoers.d/$(whoami)"
-    echo "  ✓ NOPASSWD sudo configuré"
+    local sudoers_file="/etc/sudoers.d/hackathon-$(whoami)"
+    echo "$(whoami) ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /bin/mkdir, /usr/bin/tee, /bin/chmod" \
+      | sudo tee "$sudoers_file" > /dev/null
+    sudo chmod 0440 "$sudoers_file"
+    echo "  ✓ NOPASSWD sudo configuré (apt-get, mkdir, tee, chmod)"
   else
     echo "  ✓ NOPASSWD sudo déjà configuré"
   fi
@@ -165,6 +177,8 @@ auto_setup() {
 _escape_conf_value() {
   local val="$1"
   val="${val//\\/\\\\}"
+  val="${val//\$/\\\$}"
+  val="${val//\`/\\\`}"
   val="${val//\"/\\\"}"
   printf '%s' "$val"
 }
@@ -457,7 +471,13 @@ setup_safeguards() {
       "Bash(git push --force-with-lease *)",
       "Bash(rm -rf /)",
       "Bash(rm -rf ~)",
-      "Bash(rm -rf /*)"
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf .)",
+      "Bash(rm -r -f *)",
+      "Bash(git push origin --force *)",
+      "Bash(git reset --hard *)",
+      "Bash(chmod 777 *)",
+      "Bash(chmod -R 777 *)"
     ],
     "allow": [
       "Bash(gh repo create *)",
@@ -479,7 +499,7 @@ setup_safeguards() {
         "hooks": [
           {
             "type": "command",
-            "command": "INPUT=$(cat); if echo \"$INPUT\" | jq -r '.input.command // empty' 2>/dev/null | grep -qiE 'gh repo delete|gh repo archive|gh repo edit|git push.*--force|rm -rf /|rm -rf ~|/mnt/c/|/mnt/d/|/mnt/e/'; then echo '{\"decision\": \"block\", \"reason\": \"Commande bloquée par safeguard hackathon\"}'; else echo '{\"decision\": \"allow\"}'; fi"
+            "command": "INPUT=$(cat); CMD=$(echo \"$INPUT\" | jq -r '.input.command // empty' 2>/dev/null); if echo \"$CMD\" | grep -qiE 'gh repo (delete|archive|edit)|git push.*--force|git reset --hard|rm -rf /|rm -rf ~|rm -rf \\.|rm -r -f|chmod (-R )?777|/mnt/[a-z]/'; then echo '{\"decision\": \"block\", \"reason\": \"Commande bloquée par safeguard hackathon\"}'; else echo '{\"decision\": \"allow\"}'; fi"
           }
         ]
       }
@@ -509,12 +529,22 @@ SAFEGUARDS_EOF
   log "INFO" "Safeguards GitHub configurés"
 }
 
-# ── Lancer auto_setup avant tout le reste ───────────────────────────────────
-auto_setup
-
 # ── Charger les bibliothèques ────────────────────────────────────────────────
 source "${SCRIPT_DIR}/lib/utils.sh"
 source "${SCRIPT_DIR}/lib/telegram.sh"
+
+# ── Cleanup trap ─────────────────────────────────────────────────────────────
+_cleanup() {
+  # Kill any background Telegram polling processes we spawned
+  if [[ -n "${TG_WAIT_PID:-}" ]]; then
+    kill "$TG_WAIT_PID" 2>/dev/null || true
+    wait "$TG_WAIT_PID" 2>/dev/null || true
+  fi
+}
+trap _cleanup EXIT
+
+# ── Lancer auto_setup avant tout le reste ───────────────────────────────────
+auto_setup
 
 # ── Parse des arguments ──────────────────────────────────────────────────────
 SKIP_ULTRAPLAN=false

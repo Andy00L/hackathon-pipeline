@@ -1,3 +1,9 @@
 hackathon.conf
 *.log
 .ultraplan-done
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
