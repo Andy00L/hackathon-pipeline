@@ -230,12 +230,29 @@ Actions (déléguer à l'UX Designer ou faire soi-même) :
 □ L'UX Designer vérifie l'accessibilité WCAG AA
 □ L'UX Designer applique le polish final
 
-Anti-AI-slop checklist (le Lead vérifie personnellement) :
-□ Le projet n'utilise PAS de gradient violet/bleu générique
-□ Le projet n'utilise PAS Inter/Roboto comme seule police
-□ Le projet n'a PAS de grid 3 colonnes de cards identiques
-□ Le projet a une identité visuelle reconnaissable
-□ Un juge pourrait distinguer ce projet des 50 autres soumissions
+### Utilisation obligatoire des Skills
+
+AVANT de toucher au CSS ou au design :
+□ Invoquer le skill frontend-design : lire ses guidelines
+□ Invoquer le skill ui-ux-pro-max : consulter les 67 styles,
+  161 palettes, 57 font pairings disponibles
+□ CHOISIR un style dans ui-ux-pro-max qui correspond au projet
+□ CHOISIR une palette de couleurs (PAS violet/bleu générique)
+□ CHOISIR un font pairing (PAS Inter/Roboto seul)
+
+Le résultat DOIT être visuellement distinguable des 50 autres
+soumissions du hackathon.
+
+### ANTI-AI-SLOP CHECKLIST (le Lead vérifie)
+□ PAS de gradient linéaire violet vers bleu
+□ PAS de fond noir avec texte vert néon
+□ PAS d'Inter ou Roboto comme seule police
+□ PAS de grid 3 colonnes de cards identiques avec icônes
+□ PAS de hero section avec "Welcome to [AppName]"
+□ PAS de boutons tous identiques en bleu #3B82F6
+□ Le design a une PERSONNALITÉ (brutalist, editorial, organic, etc.)
+□ Les couleurs viennent d'une palette choisie, pas random
+□ Au moins 1 élément visuel unique (animation, layout, typo)
 
 GATE DE SORTIE :
 □ L'UX Designer a produit son rapport avec score polish /10
@@ -469,6 +486,20 @@ faire en attendant.
 - Réseau perdu → retry ou message graceful
 - Fichiers manquants → fallback ou erreur descriptive
 - Le setup.sh DOIT fonctionner from scratch
+
+### Versions des frameworks
+- AVANT d'installer un framework ou une dépendance majeure :
+  □ WebSearch "[framework] latest stable version"
+  □ Utiliser la version la plus récente STABLE (pas canary/beta)
+  □ Ne JAMAIS utiliser une version qui a atteint son End of Life
+- Versions minimales (avril 2026) :
+  - Next.js : 16.x (pas 14.x ni 15.x)
+  - React : 19.x
+  - Node.js : 20.x ou 22.x
+  - TypeScript : 5.x
+  - Pour tout autre framework : WebSearch avant d'installer
+- Si tu ne connais pas la version actuelle d'un outil, fais un
+  WebSearch AVANT de l'installer. Ne te fie pas à ta mémoire.
 
 ### Vérification périodique du Lead
 

@@ -38,6 +38,14 @@ Commandes à exécuter :
 Documenter les findings avant de continuer.
 
 PHASE 2 — DÉFINIR L'IDENTITÉ VISUELLE
+AVANT de commencer le design :
+1. Lis /skill frontend-design pour les design tokens et contraintes
+2. Lis /skill ui-ux-pro-max pour choisir un style, une palette,
+   et un font pairing
+3. Documente ton choix dans un commentaire en haut du CSS principal :
+   /* Style: editorial | Palette: sunset-warm | Fonts: Space Grotesk + Inter */
+4. NE COMMENCE PAS le design sans avoir fait les 3 étapes ci-dessus
+
 AVANT de modifier quoi que ce soit, décider et documenter en commentaire CSS :
 □ Tone : corporate / playful / brutalist / editorial / minimal / organic
 □ Palette : 1 primaire + 1 accent + neutres (max 5 couleurs total)
