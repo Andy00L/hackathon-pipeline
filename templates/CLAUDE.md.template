@@ -1,13 +1,9 @@
-# Hackathon Pipeline — Instructions autonomes
+# Hackathon Pipeline — Orchestration mesh contract
 
-Tu es un agent hackathon autonome. Tu as UN SEUL objectif : produire une
-soumission de hackathon qui se classe dans le top 3. Pas minimale.
-Pas "juste suffisante". EXCEPTIONNELLE.
-
-Tu travailles de manière AUTONOME. Tu décides de l'ordre. Tu itères
-jusqu'à ce que le résultat soit à la hauteur d'un projet gagnant.
-Tu n'as PAS de limite de temps ni de turns.
-Chaque phase a une GATE de sortie. Ne skip AUCUNE gate.
+Ce fichier est le contrat d'exécution injecté automatiquement dans le
+projet cible. Il décrit l'architecture à 4 orchestrateurs, le protocole
+MCP de coordination, et chaque phase avec ses gates de sortie. Tout agent
+qui opère dans ce dépôt DOIT respecter ce contrat.
 
 ---
 
@@ -28,29 +24,142 @@ Chaque phase a une GATE de sortie. Ne skip AUCUNE gate.
 
 ---
 
-## Phase 1 — Recherche compétitive (OBLIGATOIRE avant de coder)
+## Architecture d'exécution
 
-GATE D'ENTRÉE : aucune (c'est la première phase)
+Le pipeline utilise un mesh de 4 orchestrateurs concurrents (chacun dans
+son propre terminal tmux), coordonnés par un serveur MCP stdio et un
+blackboard sur disque (.pipeline/).
 
-Avant d'écrire UNE SEULE ligne de code, tu DOIS faire cette recherche.
-Sauvegarde les résultats dans docs/COMPETITIVE-ANALYSIS.md.
+```
+                      ┌──────────────┐
+       inputs/  ───►  │  Bootstrap   │───► notes/BRIEF-DISTILLED.md
+                      │  (one-shot)  │───► notes/PACKAGES.md
+                      └──────┬───────┘
+                             │ post_message(topic="bootstrap_done")
+                      ┌──────▼───────┐
+                      │  Supervisor  │◄── lifecycle owner
+                      │  (cycles)    │
+                      └──┬───┬───┬───┘
+            ┌────────────┘   │   └────────────┐
+            ▼                ▼                ▼
+      ┌───────────┐   ┌───────────┐   ┌───────────┐
+      │  Delivery  │   │  Security  │   │  Quality   │
+      │  (build)   │   │  (audit)   │   │  (eval)    │
+      └─────┬──────┘   └─────┬──────┘   └─────┬─────┘
+            │                │                │
+            └────────────────┼────────────────┘
+                             ▼
+                     MCP Coord Server
+                    (JSON-RPC stdio)
+                             │
+                    .pipeline/ blackboard
+                    ├── inbox/{role}.jsonl
+                    ├── verdicts.jsonl
+                    ├── heartbeat/{role}.txt
+                    ├── locks/
+                    └── state.json
+```
 
-**1.1 Analyser les gagnants précédents**
+Chaque orchestrateur lit son prompt depuis
+`.claude/orchestrators/{role}.prompt.md`. Le bootstrap est un one-shot
+qui prépare les artefacts de recherche puis quitte. Les trois autres
+orchestrateurs (Delivery, Security, Quality) tournent en boucle avec
+un sleep de 30s par cycle.
+
+Le Supervisor ne produit AUCUN code applicatif. Il dispatche le travail,
+gate les transitions de phase, résout les conflits, et applique le
+protocole de terminaison triple-ACK.
+
+---
+
+## File ownership (sole-writer table)
+
+Chaque fichier a UN SEUL propriétaire en écriture. Écrire dans un
+fichier qui ne vous appartient pas est interdit.
+
+| Fichiers | Propriétaire (sole writer) |
+|---|---|
+| src/\*\*, tests/\*\*, package.json / Cargo.toml / pyproject.toml, build configs, .env.example, README.md, docs/ARCHITECTURE.md, docs/DEMO.md | Delivery |
+| docs/PLAN.md, docs/STATUS.md, docs/DECISIONS.md | Supervisor |
+| docs/SECURITY-AUDIT.md | Security |
+| docs/QUALITY-REPORT.md | Quality |
+| notes/BRIEF-DISTILLED.md, notes/PACKAGES.md | Bootstrap specialists + on-demand (acquire_file_lock requis) |
+| .pipeline/\*\* | MCP server uniquement (utiliser les outils MCP, ne jamais écrire directement) |
+
+---
+
+## MCP coordination protocol
+
+Le serveur MCP pipeline-coordinator expose 8 outils via JSON-RPC stdio.
+Tous les orchestrateurs communiquent exclusivement via ces outils.
+
+| Outil | Sémantique |
+|---|---|
+| `post_message(from_role, to_role, topic, payload, [message_id], [sha])` | Poste un message typé d'un rôle vers un autre. Déduplication sur message_id pendant 24h. |
+| `claim_next(role)` | Pop atomique du plus ancien message non-réclamé dans l'inbox du rôle. Retourne `{"status": "empty"}` si vide. |
+| `record_verdict(role, status, sha, [evidence], [findings])` | Enregistre un verdict de gate. delivery: IN_PROGRESS/BUILT/DONE/BLOCKED. security: PASS/FAIL/STALE. quality: READY/READY_WITH_FIXES/NOT_READY/STALE. |
+| `request_gate(gate_name)` | Lit la décision de gate dans state.json. Gates valides : gate_security, gate_quality, gate_terminate. |
+| `get_latest_diff(since_ref)` | Retourne le diff git depuis une référence vers HEAD, tronqué à 64 Ko. |
+| `acquire_file_lock(path, owner, [ttl_seconds])` | Acquiert un verrou exclusif sur un fichier. TTL par défaut 120s. Les verrous expirés sont repris. |
+| `release_file_lock(path, token)` | Libère un verrou acquis via le token retourné par acquire_file_lock. |
+| `heartbeat(role)` | Écrit un timestamp de heartbeat. Le watchdog bash utilise ce fichier pour la liveness. |
+
+---
+
+## Message topics
+
+Liste exhaustive des topics autorisés par le serveur MCP. Tout topic hors
+de cette liste est rejeté.
+
+| Topic | Direction | Sémantique |
+|---|---|---|
+| `implement` | Supervisor → Delivery | Assigner une tâche d'implémentation |
+| `review_diff` | Supervisor → Security | Demander un audit du diff depuis un SHA |
+| `new_feature` | Supervisor → Quality | Déclencher une évaluation qualité |
+| `sec_ok` | Security → Supervisor | Verdict PASS pour un SHA |
+| `finding` | Security → Delivery (via Supervisor) | Vulnérabilité détectée avec sévérité |
+| `regression` | Quality → Delivery (via Supervisor) | Régression détectée dans une feature |
+| `fix_applied` | Delivery → Security | Correction appliquée, re-audit demandé |
+| `blocked` | Any → Supervisor | Bloqué, intervention nécessaire |
+| `veto` | Security/Supervisor → Delivery | Arrêt immédiat du travail en cours |
+| `veto_last_commit` | Any → Delivery | Revert du dernier commit |
+| `lock_conflict` | Any → Supervisor | Conflit de verrou fichier |
+| `context_pressure` | Any → Supervisor | Pression contexte à 60% ou 80% |
+| `gate_security` | Supervisor → self | Vérification du gate sécurité |
+| `gate_quality` | Supervisor → self | Vérification du gate qualité |
+| `ping` | Supervisor → Any | Heartbeat check |
+| `shutdown` | Supervisor → All | Arrêt propre (triple-ACK) |
+| `suggest_edit` | Quality → Supervisor → Delivery | Suggestion de modification |
+| `split_request` | Delivery → Supervisor | Demande de découpage d'une tâche trop large |
+| `stuck` | Any → Supervisor | Signaler un blocage prolongé |
+| `conflict` | Delivery → Supervisor | Conflit git ou de priorité |
+
+---
+
+## Phase 1 — Recherche compétitive
+
+**Propriétaire :** Bootstrap (fenêtre bootstrap, via le spécialiste docs-reader)
+**Déclencheur :** Lancement du pipeline
+**Fichiers produits :** docs/COMPETITIVE-ANALYSIS.md, docs/RESOURCES.md
+**Note :** Cette phase est exécutée par la fenêtre bootstrap avant que
+les orchestrateurs ne démarrent. Elle n'est PAS gérée par les orchestrateurs.
+
+### 1.1 Analyser les gagnants précédents
 WebSearch : "{{HACKATHON_NAME}} winning project", "{{HACKATHON_NAME}} winner github",
 "{{HACKATHON_THEME}} hackathon winner devpost", "{{HACKATHON_THEME}} best hackathon submission"
 Pour chaque projet trouvé, WebFetch le README. Noter : stack, feature gagnante,
 qualité du README, ce qui manquait (failles exploitables pour nous).
 
-**1.2 Analyser les projets similaires**
+### 1.2 Analyser les projets similaires
 WebSearch : "[concept] github", "awesome [domaine]", "[technologie] starter template"
 Pour les repos étoilés, noter : patterns architecturaux, libraries standard, pièges connus.
 
-**1.3 Documenter la documentation disponible**
+### 1.3 Documenter la documentation disponible
 Pour CHAQUE framework/API/outil prévu :
 WebSearch "[outil] documentation 2026", WebFetch les quick starts.
 Sauvegarder les URLs dans docs/RESOURCES.md.
 
-**1.4 Définir notre différenciateur**
+### 1.4 Définir notre différenciateur
 Documenter dans docs/COMPETITIVE-ANALYSIS.md :
 - 3+ projets analysés (liens, forces, faiblesses)
 - Patterns gagnants identifiés
@@ -59,83 +168,76 @@ Documenter dans docs/COMPETITIVE-ANALYSIS.md :
 **Hackathons non-code :** si le hackathon est design, pitch deck, data analysis,
 ou tout format non-code : adapter les outputs (docs, SVG, Mermaid, présentations, datasets),
 skip les phases code/tests, concentrer sur les livrables du brief.
-L'agent Qualité évalue les livrables réels, pas du code.
 
 GATE DE SORTIE :
-□ docs/COMPETITIVE-ANALYSIS.md existe et contient 3+ projets analysés
-□ docs/RESOURCES.md existe avec les URLs de documentation
-□ Le différenciateur est défini en 1 phrase
-Vérification : wc -l docs/COMPETITIVE-ANALYSIS.md → au moins 30 lignes
+- [ ] docs/COMPETITIVE-ANALYSIS.md existe et contient 3+ projets analysés
+- [ ] docs/RESOURCES.md existe avec les URLs de documentation
+- [ ] Le différenciateur est défini en 1 phrase
+- Vérification : `wc -l docs/COMPETITIVE-ANALYSIS.md` retourne au moins 30 lignes
 
 ---
 
 ## Protocoles d'audit obligatoires
 
-Deux documents de référence sont disponibles dans docs/ :
+Deux documents de référence sont copiés dans docs/ au démarrage :
 
-1. docs/REFERENCE_SECURITY_AUDIT.md
-   Protocole d'audit sécurité professionnel en 9 phases.
-   L'agent Sécurité DOIT le lire et suivre ses phases pour l'audit final.
+1. **docs/REFERENCE_SECURITY_AUDIT.md**
+   Protocole d'audit sécurité professionnel en 9 phases (Phase 0 à Phase 9).
+   L'orchestrateur Security DOIT le lire et ses spécialistes DOIVENT suivre
+   ses phases pour l'audit final.
 
-2. docs/REFERENCE_DOCUMENTATION_AUDIT.md
-   Protocole de documentation professionnel en 7 phases.
-   L'agent Qualité DOIT le lire et suivre ses phases pour évaluer la documentation.
+2. **docs/REFERENCE_DOCUMENTATION_AUDIT.md**
+   Protocole de documentation professionnel en 7 phases (Phase 0 à Phase 7).
+   L'orchestrateur Quality DOIT le lire et le spécialiste docs-auditor DOIT
+   suivre ses phases pour évaluer la documentation.
 
-En tant que Lead, tu dois t'assurer que :
-- L'agent Sécurité a bien lu et suivi le REFERENCE_SECURITY_AUDIT.md
-- L'agent Qualité a bien lu et suivi le REFERENCE_DOCUMENTATION_AUDIT.md
+Le Supervisor vérifie que :
+- Security a bien suivi le REFERENCE_SECURITY_AUDIT.md (9 phases)
+- Quality a bien suivi le REFERENCE_DOCUMENTATION_AUDIT.md (7 phases)
 - Les rapports finaux (SECURITY-AUDIT.md et QUALITY-REPORT.md) reflètent
   l'application de ces protocoles, pas juste un scan superficiel
 
-Si un agent produit un rapport sans avoir suivi le protocole,
-demande-lui de recommencer en lisant le REFERENCE file.
+Si un rapport est produit sans avoir suivi le protocole, le Supervisor
+route un `suggest_edit` via le topic correspondant pour demander un re-run.
 
 ---
 
-## Phase 2 — Créer l'équipe Agent Teams
+## Phase 2 — Mesh initialization
 
-GATE D'ENTRÉE : Phase 1 complétée, docs/COMPETITIVE-ANALYSIS.md existe
+**Propriétaire :** Supervisor
+**Déclencheur :** Bootstrap poste `post_message(topic="bootstrap_done")` ou le
+Supervisor détecte que notes/BRIEF-DISTILLED.md et notes/PACKAGES.md existent.
+**Fichiers produits :** docs/PLAN.md, docs/STATUS.md
 
-Tu es le LEAD. Crée une équipe de 4 teammates spécialisés.
-Les fichiers de définition sont dans .claude/agents/.
+Le Supervisor :
+1. Lit notes/BRIEF-DISTILLED.md pour comprendre le brief distillé
+2. Lit notes/PACKAGES.md pour les recommandations de stack
+3. Lit docs/COMPETITIVE-ANALYSIS.md (si disponible) pour le contexte compétitif
+4. Écrit docs/PLAN.md avec le plan d'implémentation
+5. Écrit docs/STATUS.md avec l'état initial du pipeline
+6. Commence à router les tâches vers Delivery
 
-Spawne les teammates avec ces prompts :
-
-- **Architecte** : "Lis .claude/agents/architecte.md. Le plan est dans docs/PLAN.md.
-  L'analyse compétitive est dans docs/COMPETITIVE-ANALYSIS.md.
-  Commence par valider les choix d'architecture du plan."
-- **Implémenteur** : "Lis .claude/agents/implementeur.md. Le plan est dans docs/PLAN.md.
-  Attends la validation de l'Architecte. Commence par le scaffolding."
-- **Sécurité** : "Lis .claude/agents/securite.md. Surveille les changements de code
-  en continu. Signale chaque finding directement à l'Implémenteur."
-- **Qualité** : "Lis .claude/agents/qualite.md. L'analyse compétitive est dans
-  docs/COMPETITIVE-ANALYSIS.md. Attends 3+ features avant ta première évaluation."
-
-Après le spawn, distribue le travail via la task list partagée :
-
-1. Architecte : valide le stack et l'architecture du plan
-2. Implémenteur : attend la validation, puis scaffold + implémente
-3. Sécurité : audite en continu dès que du code existe
-4. Qualité : première évaluation après 3+ features implémentées
-
-Toi (Lead), tu :
-- Synthétises les rapports de chaque teammate
-- Résous les conflits entre teammates
-- Décides de la priorisation quand il y a désaccord
-- Gères la communication avec l'utilisateur via Telegram
-- Appliques les recommandations UI/UX toi-même ou délègues à l'Implémenteur
+Si inputs/ ne contient aucun fichier, le spécialiste docs-reader du bootstrap
+écrit "no inputs provided" dans notes/BRIEF-DISTILLED.md et le Supervisor
+écrit `HUMAN_INPUT_NEEDED: brief manquant` dans docs/STATUS.md plutôt que de
+fabriquer un brief.
 
 GATE DE SORTIE :
-□ 4 teammates spawnés et actifs
-□ Chaque teammate a lu ses instructions
+- [ ] notes/BRIEF-DISTILLED.md existe avec les 5 sections requises (Objective, Constraints, Judging Criteria, Timeline, Deliverables)
+- [ ] notes/PACKAGES.md existe et est non vide
+- [ ] docs/PLAN.md existe avec stack technique, architecture, features MVP
+- [ ] docs/STATUS.md existe avec l'état initial
+- Vérification : `wc -l docs/PLAN.md` retourne au moins 40 lignes
 
 ---
 
-## Phase 3 — Planification
+## Phase 3 — Planification (Supervisor)
 
-GATE D'ENTRÉE : Phase 2 complétée, équipe spawnée
+**Propriétaire :** Supervisor
+**Déclencheur :** Phase 2 complétée, docs/PLAN.md écrit
+**Fichiers produits :** docs/PLAN.md (mis à jour après validation architecte)
 
-Produis un plan détaillé dans docs/PLAN.md :
+Le Supervisor écrit docs/PLAN.md avec :
 
 1. Stack technique justifié (pourquoi ce stack vs les alternatives)
 2. Architecture avec data flow
@@ -147,22 +249,22 @@ Produis un plan détaillé dans docs/PLAN.md :
 5. Risques et mitigations
 6. Besoins externes (clés API, datasets, services)
 
-Le plan doit être validé par l'Architecte avant l'implémentation.
+Le Supervisor poste `implement` à Delivery avec la première tâche pour
+déclencher la validation architecturale par le spécialiste architecte.
 
 GATE DE SORTIE :
-□ docs/PLAN.md existe avec toutes les sections ci-dessus
-□ L'Architecte a donné un verdict VALIDÉ (pas de BLOQUANT)
-□ Les features MUST sont identifiées (3-5 max)
-Vérification : wc -l docs/PLAN.md → au moins 40 lignes
+- [ ] docs/PLAN.md contient toutes les sections ci-dessus
+- [ ] Le spécialiste architecte de Delivery a validé (pas de BLOQUANT)
+- [ ] Les features MUST sont identifiées (3-5 max)
+- Vérification : `wc -l docs/PLAN.md` retourne au moins 40 lignes
 
 ---
 
-## Phase 4 — Implémentation
+## Phase 4 — Implémentation (Delivery)
 
-GATE D'ENTRÉE : Phase 3 complétée, plan validé par l'Architecte
-
-L'Implémenteur code. L'Architecte review. La Sécurité audite.
-Toi (Lead) tu coordonnes.
+**Propriétaire :** Delivery
+**Déclencheur :** Supervisor poste `implement` avec les tâches du plan
+**Fichiers produits :** src/\*\*, tests/\*\*, package.json ou équivalent, .env.example
 
 ### Structure du projet attendue
 
@@ -189,229 +291,353 @@ project/
 
 ### Workflow par feature
 
-L'Implémenteur suit sa propre checklist. Pour chaque feature :
-1. L'Implémenteur code la feature
-2. L'Implémenteur écrit les tests
-3. L'Implémenteur exécute les tests
-4. La Sécurité audite le code changé
-5. L'Implémenteur corrige les findings sécurité
-6. Git commit atomique
+Delivery spawne ses spécialistes (implementeur, architecte, test-writer)
+pour chaque feature. Pour chaque feature :
 
-LE LEAD VÉRIFIE après chaque feature :
-□ git log --oneline -5 → le commit existe et est descriptif
-□ Les tests passent (vérifier dans les messages de l'Implémenteur)
-□ La Sécurité n'a pas de finding CRITIQUE en attente
+1. Le spécialiste architecte valide le design (si nécessaire)
+2. Le spécialiste implementeur code la feature
+3. Le spécialiste implementeur ou test-writer écrit les tests
+4. Le spécialiste implementeur exécute les tests
+5. Git commit atomique (fichiers nommés explicitement, pas `git add -A`)
+6. Delivery poste `record_verdict(role="delivery", status="DONE", sha=HEAD_SHA)`
+7. Le Supervisor route le SHA vers Security (`review_diff`)
+8. Security audite et poste son verdict
+9. Le Supervisor route le SHA vers Quality (`new_feature`)
 
-### Discipline git et contexte
+### Scope limits par tâche
 
-□ Git commit atomique après CHAQUE feature fonctionnelle
-□ Git tag intermédiaire tous les 2-3 features : v0.1, v0.2, etc.
-□ Avant chaque boucle qualité, résumer les décisions clés dans docs/DECISIONS.md
-□ Si un agent demande "pourquoi X ?", la réponse doit être dans DECISIONS.md
+Le spécialiste implementeur respecte des limites strictes par tâche :
+- Maximum 400 LOC modifiées
+- Maximum 8 fichiers touchés
+- Maximum 1 nouvelle dépendance
+
+Si une tâche dépasse ces limites, Delivery poste `split_request` au
+Supervisor. Le Supervisor découpe et renvoie des sous-tâches.
+
+### Protocole de verrou pour fichiers partagés
+
+Pour écrire dans un fichier qui n'est pas dans la sole-writer table de
+Delivery (ex: notes/BRIEF-DISTILLED.md en on-demand) :
+1. `acquire_file_lock(path, owner="delivery", ttl_seconds=120)`
+2. Écrire le fichier
+3. `release_file_lock(path, token)`
+4. Ne jamais garder un verrou plus de 120s
+
+### Discipline git
+
+- Git commit atomique après CHAQUE feature fonctionnelle
+- Git tag intermédiaire tous les 2-3 features : v0.1, v0.2, etc.
+- Résumer les décisions clés dans docs/DECISIONS.md (via le Supervisor)
+- Format des messages : feat/fix/test/docs/refactor: description
 
 GATE DE SORTIE :
-□ Toutes les features MUST sont implémentées et testent OK
-□ Au moins 50% des features SHOULD sont implémentées
-□ Aucun finding CRITIQUE de la Sécurité en attente
-□ git log --oneline | wc -l → au moins 5 commits
-Vérification : ls src/ | wc -l → des fichiers existent
+- [ ] Toutes les features MUST sont implémentées et les tests passent
+- [ ] Au moins 50% des features SHOULD sont implémentées
+- [ ] Aucun finding CRITIQUE de Security en attente
+- [ ] `git log --oneline | wc -l` retourne au moins 5 commits
+- Vérification : `ls src/ | wc -l` retourne des fichiers
 
 ---
 
-## Phase 5 — UI/UX Premium
+## Phase 5 — UI/UX Premium (Delivery + Quality)
 
-GATE D'ENTRÉE : Phase 4 complétée, features MUST implémentées
+**Propriétaire :** Delivery (implémentation), Quality (évaluation via ui-quality-reviewer)
+**Déclencheur :** Features MUST implémentées, Phase 4 gate passée
+**Fichiers produits :** Modifications dans src/\*\* (Delivery), score dans docs/QUALITY-REPORT.md (Quality)
 
-Actions (déléguer à l'UX Designer ou faire soi-même) :
-□ L'UX Designer exécute son audit visuel (PHASE 1 de ses instructions)
-□ L'UX Designer définit l'identité visuelle
-□ L'UX Designer vérifie les composants (hover, focus, loading, error, empty)
-□ L'UX Designer vérifie le responsive (375px à 1440px)
-□ L'UX Designer vérifie l'accessibilité WCAG AA
-□ L'UX Designer applique le polish final
+Le spécialiste implementeur de Delivery applique les améliorations UI.
+Le spécialiste ui-quality-reviewer de Quality évalue le résultat.
+Le Supervisor gate sur l'axe 2 (Polish) >= 7/10.
 
 ### Utilisation obligatoire des Skills
 
 AVANT de toucher au CSS ou au design :
-□ Invoquer le skill frontend-design : lire ses guidelines
-□ Invoquer le skill ui-ux-pro-max : consulter les 67 styles,
+- Invoquer le skill frontend-design : lire ses guidelines
+- Invoquer le skill ui-ux-pro-max : consulter les 67 styles,
   161 palettes, 57 font pairings disponibles
-□ CHOISIR un style dans ui-ux-pro-max qui correspond au projet
-□ CHOISIR une palette de couleurs (PAS violet/bleu générique)
-□ CHOISIR un font pairing (PAS Inter/Roboto seul)
+- CHOISIR un style dans ui-ux-pro-max qui correspond au projet
+- CHOISIR une palette de couleurs (PAS violet/bleu générique)
+- CHOISIR un font pairing (PAS Inter/Roboto seul)
 
 Le résultat DOIT être visuellement distinguable des 50 autres
 soumissions du hackathon.
 
-### ANTI-AI-SLOP CHECKLIST (le Lead vérifie)
-□ PAS de gradient linéaire violet vers bleu
-□ PAS de fond noir avec texte vert néon
-□ PAS d'Inter ou Roboto comme seule police
-□ PAS de grid 3 colonnes de cards identiques avec icônes
-□ PAS de hero section avec "Welcome to [AppName]"
-□ PAS de boutons tous identiques en bleu #3B82F6
-□ Le design a une PERSONNALITÉ (brutalist, editorial, organic, etc.)
-□ Les couleurs viennent d'une palette choisie, pas random
-□ Au moins 1 élément visuel unique (animation, layout, typo)
+### ANTI-AI-SLOP CHECKLIST (vérifié par Quality via ui-quality-reviewer)
+
+- [ ] PAS de gradient linéaire violet vers bleu
+- [ ] PAS de fond noir avec texte vert néon
+- [ ] PAS d'Inter ou Roboto comme seule police
+- [ ] PAS de grid 3 colonnes de cards identiques avec icônes
+- [ ] PAS de hero section avec "Welcome to [AppName]"
+- [ ] PAS de boutons tous identiques en bleu #3B82F6
+- [ ] Le design a une PERSONNALITÉ (brutalist, editorial, organic, etc.)
+- [ ] Les couleurs viennent d'une palette choisie, pas random
+- [ ] Au moins 1 élément visuel unique (animation, layout, typo)
 
 GATE DE SORTIE :
-□ L'UX Designer a produit son rapport avec score polish /10
-□ Score polish >= 7/10
-□ Si score < 7 → l'UX Designer itère
+- [ ] Le spécialiste ui-quality-reviewer a produit son rapport avec score polish /10
+- [ ] Score polish (axe 2) >= 7/10
+- [ ] Si score < 7, Delivery itère sur les corrections (routées par Supervisor via `suggest_edit`)
+- Vérification : `grep "Polish" docs/QUALITY-REPORT.md` contient un score >= 7
 
 ---
 
-## Phase 6 — Documentation
+## Phase 6 — Documentation (Delivery via readme-specialist)
 
-GATE D'ENTRÉE : Phase 5 complétée, UI validée
+**Propriétaire :** Delivery (via le spécialiste readme-specialist)
+**Déclencheur :** Phase 5 gate passée, UI validée
+**Fichiers produits :** README.md, docs/ARCHITECTURE.md, docs/DEMO.md, .env.example
 
-README.md structure IMPOSÉE (chaque section est obligatoire) :
-□ Titre + tagline (1 phrase qui vend le projet)
-□ Screenshot ou diagramme d'architecture
-□ "What it does" (2-3 phrases)
-□ "Why it matters" (le problème résolu)
-□ Quick Start (MAXIMUM 3 commandes)
-□ Installation détaillée
-□ Configuration (.env variables)
-□ Features avec descriptions
-□ Architecture overview
-□ Tech stack avec justification
-□ API documentation (si applicable)
-□ Structure du projet
-□ Known limitations
-□ Documentation and Resources (liens docs en ligne vérifiés)
-□ License
+Le spécialiste readme-specialist de Delivery écrit et vérifie la documentation.
+Le spécialiste docs-auditor de Quality exécute le protocole de 7 phases de
+REFERENCE_DOCUMENTATION_AUDIT.md pour valider.
+
+README.md structure IMPOSEE (chaque section est obligatoire) :
+- Titre + tagline (1 phrase qui vend le projet)
+- Screenshot ou diagramme d'architecture
+- "What it does" (2-3 phrases)
+- "Why it matters" (le problème résolu)
+- Quick Start (MAXIMUM 3 commandes)
+- Installation détaillée
+- Configuration (.env variables)
+- Features avec descriptions
+- Architecture overview
+- Tech stack avec justification
+- API documentation (si applicable)
+- Structure du projet
+- Known limitations
+- Documentation and Resources (liens docs en ligne vérifiés)
+- License
 
 Autres docs obligatoires :
-□ docs/ARCHITECTURE.md avec diagramme Mermaid
-□ docs/DEMO.md avec script de démo chronométré (3 min max)
-□ .env.example avec CHAQUE variable documentée
+- docs/ARCHITECTURE.md avec diagramme Mermaid
+- docs/DEMO.md avec script de démo chronométré (3 min max)
+- .env.example avec CHAQUE variable documentée
 
 Liens documentation en ligne (OBLIGATOIRE) :
 Pour CHAQUE outil utilisé dans le projet :
-- Trouve la documentation officielle via WebSearch
-- Vérifie que l'URL fonctionne via WebFetch ou curl
-- Ajoute dans la section "Documentation and Resources" du README
+- Trouver la documentation officielle via WebSearch
+- Vérifier que l'URL fonctionne via WebFetch ou curl
+- Ajouter dans la section "Documentation and Resources" du README
 
-Vérifications concrètes (le Lead les exécute) :
-□ Chaque commande du Quick Start est exécutée et fonctionne
-□ Chaque lien dans le README pointe vers un fichier qui existe :
-  grep -oP '\[.*?\]\((?!http)(.*?)\)' README.md | while read link; do
-    file=$(echo "$link" | sed 's/.*(\(.*\))/\1/' | sed 's/#.*//')
-    [[ -n "$file" ]] && [[ ! -f "$file" ]] && echo "BROKEN: $file"
-  done
-□ Pas de placeholder :
-  grep -rni "TODO\|coming soon\|add screenshot\|placeholder" README.md docs/
-□ Pas de long dash :
-  grep -rn "\-\-\-" README.md docs/*.md 2>/dev/null
-□ Pas de buzzword corporate :
-  grep -rni "unprecedented\|flagship\|cutting-edge\|revolutionary\|seamlessly\|best-in-class" README.md docs/*.md 2>/dev/null
+### Vérifications exécutées par le spécialiste docs-auditor
+
+Chaque commande du Quick Start est exécutée et fonctionne.
+
+Chaque lien dans le README pointe vers un fichier qui existe :
+```bash
+grep -oP '\[.*?\]\((?!http)(.*?)\)' README.md | while read link; do
+  file=$(echo "$link" | sed 's/.*(\(.*\))/\1/' | sed 's/#.*//')
+  [[ -n "$file" ]] && [[ ! -f "$file" ]] && echo "BROKEN: $file"
+done
+```
+
+Pas de placeholder :
+```bash
+grep -rni "TODO\|coming soon\|add screenshot\|placeholder" README.md docs/
+```
+
+Pas de long dash :
+```bash
+grep -rn "\-\-\-" README.md docs/*.md 2>/dev/null
+```
+
+Pas de buzzword corporate :
+```bash
+grep -rni "unprecedented\|flagship\|cutting-edge\|revolutionary\|seamlessly\|best-in-class" README.md docs/*.md 2>/dev/null
+```
 
 GATE DE SORTIE :
-□ README.md contient toutes les sections listées ci-dessus
-□ docs/ARCHITECTURE.md existe avec un diagramme
-□ docs/DEMO.md existe avec un script chronométré
-□ .env.example existe
-□ Aucun lien cassé
-□ Aucun placeholder
-□ Aucun long dash
-□ Aucun buzzword
+- [ ] README.md contient toutes les sections listées ci-dessus
+- [ ] docs/ARCHITECTURE.md existe avec un diagramme Mermaid
+- [ ] docs/DEMO.md existe avec un script chronométré
+- [ ] .env.example existe avec chaque variable documentée
+- [ ] Aucun lien cassé (vérification grep ci-dessus retourne 0 résultat)
+- [ ] Aucun placeholder (grep retourne 0 résultat)
+- [ ] Aucun long dash (grep retourne 0 résultat)
+- [ ] Aucun buzzword (grep retourne 0 résultat)
 
 ---
 
-## Phase 7 — Audit sécurité final
+## Phase 7 — Audit sécurité final (Security)
 
-GATE D'ENTRÉE : Phase 6 complétée, documentation prête
+**Propriétaire :** Security
+**Déclencheur :** Phase 6 gate passée, documentation prête. Le Supervisor
+poste `review_diff` avec le SHA courant.
+**Fichiers produits :** docs/SECURITY-AUDIT.md
 
-Actions :
-□ Demander à la Sécurité un audit COMPLET du projet final
-□ La Sécurité doit suivre le protocole REFERENCE_SECURITY_AUDIT.md
-□ La Sécurité produit docs/SECURITY-AUDIT.md avec verdict PASS/FAIL
+L'orchestrateur Security exécute le protocole complet de 9 phases du
+fichier REFERENCE_SECURITY_AUDIT.md en utilisant ses spécialistes :
+
+- **threat-modeler** : Produit docs/THREAT-MODEL.md avec un diagramme Mermaid
+  des trust boundaries (Phase 2 du protocole)
+- **injection-specialist** : OWASP A01/A03/A10 (Phase 3.3 du protocole)
+- **secrets-config-specialist** : OWASP A05/A06 (Phase 3.2, 3.8 du protocole)
+- **auth-crypto-specialist** : OWASP A02/A07 (Phase 3.2 du protocole)
+- **deps-auditor** : Audit des dépendances (Phase 7.3 du protocole)
+
+Security intersecte les verdicts des trois spécialistes principaux.
+PASS uniquement quand les trois sont verts sur le meme SHA.
+
+Le rapport docs/SECURITY-AUDIT.md contient :
+- Date d'audit et HEAD_SHA
+- Nombre de fichiers scannés
+- Chaque finding : sévérité, file:line, description, fix recommandé, status (OPEN/FIXED/WONTFIX)
+- Comptes par sévérité : CRITICAL, HIGH, MEDIUM, LOW
+- Verdict global : PASS ou FAIL
 
 Si FAIL :
-□ Lire le rapport : identifier les findings CRITIQUE et HAUTE
-□ Transmettre chaque finding à l'Implémenteur avec priorité
-□ L'Implémenteur corrige
-□ Redemander un audit à la Sécurité
-□ Itérer jusqu'à PASS (pas de limite d'itérations)
+1. Security poste chaque finding CRITICAL et HIGH à Delivery via `finding`
+2. Delivery corrige et poste `fix_applied` avec le nouveau SHA
+3. Security re-audite UNIQUEMENT les lignes modifiées
+4. Trichotomie pour chaque fix : FIXED / PARTIAL / REGRESSION
+5. Itérer jusqu'à PASS (pas de limite d'itérations)
 
 GATE DE SORTIE :
-□ docs/SECURITY-AUDIT.md existe
-□ Le verdict est PASS
-□ Aucun finding CRITIQUE restant
-□ Maximum 2 findings HAUTE résolues ou justifiées
+- [ ] docs/SECURITY-AUDIT.md existe
+- [ ] Le verdict est PASS
+- [ ] Aucun finding CRITIQUE restant (count = 0)
+- [ ] Maximum 2 findings HIGH résolues ou justifiées dans docs/DECISIONS.md
+- Vérification : `grep "PASS" docs/SECURITY-AUDIT.md`
 
 ---
 
-## Phase 8 — Évaluation qualité et itération
+## Phase 8 — Évaluation qualité et itération (Quality)
 
-GATE D'ENTRÉE : Phase 7 complétée, sécurité PASS
+**Propriétaire :** Quality
+**Déclencheur :** Phase 7 gate passée, Security PASS. Le Supervisor
+poste `new_feature` avec le SHA courant.
+**Fichiers produits :** docs/QUALITY-REPORT.md
 
-Actions :
-□ Demander à la Qualité une évaluation COMPLÈTE
-□ La Qualité doit suivre le protocole REFERENCE_DOCUMENTATION_AUDIT.md pour la doc
-□ La Qualité produit docs/QUALITY-REPORT.md avec score /50
+L'orchestrateur Quality exécute le protocole complet de 7 phases du
+fichier REFERENCE_DOCUMENTATION_AUDIT.md via ses spécialistes :
 
-Boucle d'itération :
-  Score >= 45 → READY (passer à Phase 9)
-  Score 35-44 → READY WITH FIXES
-    □ Lire la liste des fixes (max 5)
-    □ Appliquer chaque fix (Lead ou Implémenteur)
-    □ Redemander une évaluation
-    □ Itérer jusqu'à >= 45
-  Score < 35 → NOT READY
-    □ Lire les bloquants par priorité
-    □ Corriger chaque bloquant dans l'ordre
-    □ Redemander une évaluation
-    □ Itérer jusqu'à >= 35, puis continuer vers 45
+- **scratch-tester** : Test setup from scratch (axe 1 Completude)
+- **code-quality-reviewer** : Qualité code, complexité, dead code (axes 1 et 5)
+- **ui-quality-reviewer** : Polish, responsive, a11y, anti-AI-slop (axe 2)
+- **docs-auditor** : Documentation, 7 phases REFERENCE (axe 4 Presentation)
+- **package-research-specialist** : Versions des dépendances
 
-PAS DE LIMITE D'ITÉRATIONS. Le Lead itère jusqu'au consensus.
+Quality agrège les scores des spécialistes dans une grille /50 :
+
+| Axe | Score | Évalué par |
+|---|---|---|
+| 1. Completude | /10 | scratch-tester + code-quality-reviewer |
+| 2. Polish | /10 | ui-quality-reviewer |
+| 3. Innovation | /10 | Quality orchestrateur (directement) |
+| 4. Presentation | /10 | docs-auditor |
+| 5. Robustesse | /10 | code-quality-reviewer |
+| **Total** | **/50** | |
+
+### Boucle d'itération
+
+Score >= 45 : verdict **READY** (passer à Phase 9)
+
+Score 35-44 : verdict **READY_WITH_FIXES**
+- Quality poste `suggest_edit` au Supervisor avec la liste de max 5 fixes
+- Le Supervisor route les fixes à Delivery
+- Delivery applique les corrections
+- Quality re-évalue UNIQUEMENT les axes impactés par les corrections
+- Itérer jusqu'à >= 45
+
+Score < 35 : verdict **NOT_READY**
+- Quality poste `blocked` au Supervisor avec la liste des bloquants
+- Le Supervisor route les bloquants à Delivery par priorité
+- Delivery corrige chaque bloquant
+- Quality re-évalue
+- Itérer jusqu'à >= 35, puis continuer vers 45
+
+PAS DE LIMITE D'ITÉRATIONS. Le Supervisor itère jusqu'au consensus.
 
 Avant chaque nouvelle itération :
-□ Résumer les décisions prises dans docs/DECISIONS.md
-□ git commit les corrections
-□ Vérifier que les corrections n'ont pas cassé d'autres features
+- Delivery commit les corrections (fichiers nommés explicitement)
+- Le Supervisor résume les décisions dans docs/DECISIONS.md
+- Le Supervisor vérifie que les corrections n'ont pas cassé d'autres features
 
 GATE DE SORTIE :
-□ docs/QUALITY-REPORT.md existe
-□ Score >= 45/50
-□ Verdict READY
+- [ ] docs/QUALITY-REPORT.md existe
+- [ ] Score >= 45/50
+- [ ] Verdict READY
+- Vérification : `grep "READY" docs/QUALITY-REPORT.md`
 
 ---
 
-## Phase 9 — Terminaison
+## Phase 9 — Terminaison (Supervisor)
 
-GATE D'ENTRÉE : Toutes ces conditions sont remplies simultanément :
-□ Sécurité : PASS
-□ Qualité : READY (>= 45/50)
-□ Documentation : complète avec liens en ligne
-□ Tests : passent
-□ Setup : fonctionne from scratch
+**Propriétaire :** Supervisor (exclusif)
+**Déclencheur :** Triple-ACK : les trois verdicts frais sur le meme HEAD_SHA
+**Fichiers produits :** Tag v1.0.0, archive ZIP
 
-Actions de terminaison (séquentielles, pas de skip) :
-1. Supprimer CLAUDE.md (fichier interne du pipeline)
-2. Supprimer .pipeline.log et .pipeline-live.log
-3. Supprimer tout fichier temporaire (.claude-stderr.log, etc.)
-4. Dernier git commit : "feat: hackathon submission ready"
-5. git tag v1.0.0
-6. Créer l'archive :
+### Triple-ACK Termination Block
+
+Soit HEAD_SHA = `git rev-parse HEAD`. Lire `.pipeline/verdicts.jsonl` ;
+pour chaque paire `(role, sha)` ne garder que le record avec le `seq`
+le plus élevé.
+
+Requis simultanément :
+
+```
+V_delivery(HEAD_SHA) = DONE
+V_security(HEAD_SHA) = PASS   (aucun CRITICAL/HIGH ouvert pour HEAD_SHA)
+V_quality (HEAD_SHA) = READY  (score >= 45)
+```
+
+**Invalidation :** si HEAD_SHA change, tous les verdicts précédents
+deviennent stale. Les verdicts stale NE satisfont PAS les conditions
+ci-dessus. Le Supervisor re-poste `review_diff` à Security et
+`new_feature` à Quality pour le nouveau SHA. Delivery re-poste DONE
+uniquement quand sa queue est vide et le working tree est propre.
+
+### stability window
+
+Les trois verdicts doivent etre frais ET sur le meme HEAD_SHA pendant
+3 cycles consécutifs (>= 90s) sans nouveaux commits et sans nouveaux
+messages dans l'inbox de quelque orchestrateur que ce soit.
+
+Toute violation remet le compteur à 0.
+
+Tant que le compteur n'atteint pas 3, le Supervisor CONTINUE DE BOUCLER.
+Pas de sortie anticipée.
+
+### Séquence de terminaison (compteur = 3)
+
+1. `git tag v1.0.0`
+2. Créer l'archive :
+   ```bash
    cd .. && zip -r hackathon-submission.zip [nom-du-dossier]/ \
-     -x "*/node_modules/*" "*/.git/*" "*/venv/*" "*/__pycache__/*"
-7. Git push final : git push origin HEAD && git push origin v1.0.0
-8. Notification Telegram :
-   "HACKATHON TERMINÉ
-   Score qualité : X/50
-   Sécurité : PASS
-   Repo : [lien github]
-   L'archive ZIP est dans le répertoire parent."
+     -x "*/node_modules/*" "*/.git/*" "*/venv/*" "*/__pycache__/*" \
+     "*/.pipeline/*" "*/dist/*" "*/.next/*" "*/build/*" "*/target/*"
+   ```
+3. `git push origin HEAD && git push origin v1.0.0`
+4. Poster `shutdown` à chaque pair :
+   - `post_message(from_role="supervisor", to_role="delivery", topic="shutdown", payload="terminate")`
+   - Idem pour security et quality
+5. Attendre l'ACK de chaque pair : `claim_next(role="supervisor")` en boucle
+   pendant max 60s par pair, cherchant les messages `shutdown` avec payload `"ACK"`.
+6. Supprimer CLAUDE.md (fichier interne du pipeline)
+7. Supprimer .pipeline.log et .pipeline-live.log
+8. Supprimer tout fichier temporaire (.claude-stderr.log, etc.)
+9. Dernier git commit : "feat: hackathon submission ready"
+10. Exit code 0.
+
+### Notification finale (Telegram si disponible)
+
+```
+HACKATHON TERMINE
+Score qualité : X/50
+Sécurité : PASS
+Repo : [lien github]
+L'archive ZIP est dans le répertoire parent.
+```
 
 GATE DE SORTIE : aucune (c'est la dernière phase)
 
 ---
 
-## Communication avec l'utilisateur (Telegram)
+## Communication (Telegram + HUMAN_INPUT_NEEDED)
 
-Le canal Telegram est ta connexion avec l'utilisateur.
+Le canal Telegram est la connexion avec l'utilisateur.
+SEUL le Supervisor escalade vers l'utilisateur.
 
 ### Quand contacter l'utilisateur
 
@@ -424,7 +650,7 @@ Le canal Telegram est ta connexion avec l'utilisateur.
 
 ### Format
 
-Pour les besoins d'input, écris dans le chat Telegram :
+Pour les besoins d'input :
 ```
 Input requis :
 - [Description précise de ce qui est nécessaire]
@@ -442,14 +668,14 @@ Progression :
 
 ### Si pas de Telegram
 
-Si le canal Telegram n'est pas disponible et que tu as besoin
-d'un input externe, écris HUMAN_INPUT_NEEDED: dans ta sortie
-suivi de chaque élément nécessaire. Continue sur ce que tu peux
-faire en attendant.
+Si le canal Telegram n'est pas disponible et qu'un input externe est
+nécessaire, le Supervisor écrit `HUMAN_INPUT_NEEDED:` dans docs/STATUS.md
+suivi de chaque élément nécessaire. Les autres orchestrateurs continuent
+sur ce qu'ils peuvent faire en attendant.
 
 ---
 
-## Règles NON-NÉGOCIABLES
+## Règles NON-NEGOCIABLES
 
 ### Sécurité
 - JAMAIS de secrets dans le code ou les commits
@@ -464,14 +690,16 @@ faire en attendant.
 - Pas de TODO/FIXME/HACK non résolus dans le code final
 - Pas de placeholder "coming soon"
 - Chaque feature listée dans le README DOIT fonctionner
-- Chaque import doit être utilisé
-- Chaque fonction doit être appelée
+- Chaque import doit etre utilisé
+- Chaque fonction doit etre appelée
 
 ### Git
 - Commits atomiques avec messages descriptifs
 - Format : feat/fix/test/docs: description
 - Pas de commit de code qui ne compile pas
 - Pas de secrets dans l'historique git
+- JAMAIS `git add -A` ou `git add .` : toujours nommer les fichiers explicitement
+- JAMAIS `git commit --no-verify` : ne jamais désactiver les hooks
 
 ### Documentation
 - README avec toutes les sections listées ci-dessus
@@ -481,42 +709,55 @@ faire en attendant.
 - docs/DEMO.md avec script de démo
 
 ### Robustesse
-- Inputs vides → message d'erreur clair
-- Inputs malformés → message d'erreur clair
-- Réseau perdu → retry ou message graceful
-- Fichiers manquants → fallback ou erreur descriptive
+- Inputs vides : message d'erreur clair
+- Inputs malformés : message d'erreur clair
+- Réseau perdu : retry ou message graceful
+- Fichiers manquants : fallback ou erreur descriptive
 - Le setup.sh DOIT fonctionner from scratch
 
 ### Versions des frameworks
 - AVANT d'installer un framework ou une dépendance majeure :
-  □ WebSearch "[framework] latest stable version"
-  □ Utiliser la version la plus récente STABLE (pas canary/beta)
-  □ Ne JAMAIS utiliser une version qui a atteint son End of Life
+  WebSearch "[framework] latest stable version"
+- Utiliser la version la plus récente STABLE (pas canary/beta)
+- Ne JAMAIS utiliser une version qui a atteint son End of Life
 - Versions minimales (avril 2026) :
   - Next.js : 16.x (pas 14.x ni 15.x)
   - React : 19.x
   - Node.js : 20.x ou 22.x
   - TypeScript : 5.x
   - Pour tout autre framework : WebSearch avant d'installer
-- Si tu ne connais pas la version actuelle d'un outil, fais un
-  WebSearch AVANT de l'installer. Ne te fie pas à ta mémoire.
+- Ne JAMAIS deviner une version de library : toujours WebSearch + WebFetch
+  la page de release pour confirmer la version courante
 
-### Vérification périodique du Lead
+### Verdicts
+- Ne JAMAIS committer du code qui n'a pas recu le verdict de l'orchestrateur
+  concerné pour HEAD
+- Delivery ne commit que du code qui passe ses propres tests
+- Security ne marque PASS que quand les 3 spécialistes sont verts
+- Quality ne marque READY que quand le score est >= 45/50
 
-Toutes les 3-4 features, le Lead exécute :
-□ git log --oneline | wc -l → des commits récents existent
-□ git diff --stat → pas de fichiers modifiés non commités
-□ find src/ -name "*.ts" -o -name "*.py" -o -name "*.js" | wc -l → le projet grandit
-□ grep -rn "TODO\|FIXME\|HACK" src/ | wc -l → tracker les dettes techniques
-□ Vérifier que la Sécurité n'a pas de findings CRITIQUE en attente
-□ Estimer le temps restant vs la deadline
+### Sole-writer discipline
+- Ne JAMAIS écrire dans un fichier hors de la sole-writer table de
+  votre orchestrateur
+- Pour les fichiers partagés (notes/), toujours acquire_file_lock
+  avant d'écrire et release_file_lock après
+
+### Mémoire
+- Ne JAMAIS accumuler d'état en mémoire conversationnelle
+- Re-lire le disque (verdicts.jsonl, heartbeat, STATUS.md, PLAN.md) à
+  chaque cycle
+- Le checkpoint à 80% de pression contexte est obligatoire (exit 42)
+
+### Terminaison
+- Ne JAMAIS bypasser le protocole de terminaison triple-ACK
+- Ne JAMAIS poster `shutdown` avant que le compteur de stability
+  window atteigne 3
+- Ne JAMAIS sortir avec code 0 sans que les 3 ACK soient recus
 
 ---
 
 ## Rappel final
 
-Tu n'es PAS limité en turns ni en temps.
-La qualité est la SEULE priorité.
-Le projet doit être dans le top 3 du hackathon.
-Itère jusqu'au consensus.
-Chaque phase a une GATE de sortie. Ne skip AUCUNE gate.
+La qualité est la SEULE priorité. Le projet doit etre dans le top 3
+du hackathon. Les orchestrateurs itèrent jusqu'au consensus. Chaque
+phase a une GATE de sortie. Ne skip AUCUNE gate.
