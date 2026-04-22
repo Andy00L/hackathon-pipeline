@@ -21,7 +21,15 @@
       "Bash(pip install:*)",
       "Bash(python3 -c \"import mcp; print\\('mcp version:', mcp.__version__\\)\")",
       "Bash(sudo apt-get:*)",
-      "Bash(git check-ignore:*)"
+      "Bash(git check-ignore:*)",
+      "Bash(ls:*)",
+      "Bash(chmod +x:*)",
+      "Bash(shellcheck /home/drew/pipeline_hack/templates/hooks/*.sh)",
+      "Bash(CLAUDE_PROJECT_DIR=/home/drew/pipeline_hack templates/hooks/pretooluse-safeguard.sh)",
+      "Bash(CLAUDE_PROJECT_DIR=/home/drew/pipeline_hack /home/drew/pipeline_hack/templates/hooks/pretooluse-safeguard.sh)",
+      "Bash(CLAUDE_PROJECT_DIR=/home/drew/pipeline_hack python3 mcp-coord/client_helper.py post_message --from delivery --to security --topic review_diff --payload '{\"auto\":true}' --sha abc123)",
+      "Bash(python3:*)",
+      "Bash(git:*)"
     ]
   }
 }
