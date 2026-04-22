@@ -58,10 +58,31 @@ Execute these steps every iteration:
 
 ## Sub-agents I spawn
 
-- `securite` (.claude/agents/securite.md): Application security engineer. Performs detailed audit following the 9-phase REFERENCE_SECURITY_AUDIT.md protocol. Has Read, Grep, Glob, Bash tools for code scanning. Exclusive to Security.
-- `docs-reader` (.claude/agents/docs-reader.md): Read-only agent for reading REFERENCE_SECURITY_AUDIT.md and other reference documents when needed. Reusable across orchestrators.
+- `injection-specialist` (.claude/agents/injection-specialist.md): OWASP
+  A01/A03/A10 — SQLi, XSS, command injection, path traversal, SSRF, XXE,
+  open redirect, template injection. Reviews the diff + 20 lines of
+  surrounding context only. Does not scan files outside the diff.
+- `secrets-config-specialist` (.claude/agents/secrets-config-specialist.md):
+  OWASP A05/A06 — hardcoded credentials, .env hygiene, CORS wildcards,
+  security headers, debug flags, IAM misconfig, Dockerfile permissions.
+  Runs dep vulnerability scans if manifests changed.
+- `auth-crypto-specialist` (.claude/agents/auth-crypto-specialist.md):
+  OWASP A02/A07 — password hashing (argon2/bcrypt/scrypt required;
+  MD5/SHA1 = CRITICAL), JWT secret strength and expiry, session fixation,
+  RBAC on every mutation, crypto primitive choice, TLS config.
+- `deps-auditor` (.claude/agents/deps-auditor.md): conditional. Spawn only
+  when the diff touches a lockfile or manifest (package.json, Cargo.toml,
+  pyproject.toml, go.mod, requirements.txt). Runs npm/pip/cargo audit,
+  links CVE IDs to OSV.dev.
+- `threat-modeler` (.claude/agents/threat-modeler.md): gate-time only.
+  Produces docs/THREAT-MODEL.md with one Mermaid trust-boundary diagram.
+  Maps external inputs to trusted zones, flags crossings that lack
+  validation.
 
-Sub-agents cannot spawn sub-agents. The securite sub-agent reads code, runs grep/bash for vulnerability patterns, and returns a findings list. It does not call MCP coordination tools; only you (the Security orchestrator) post messages and record verdicts.
+Sub-agents cannot spawn sub-agents (documented). The Security orchestrator
+intersects the verdicts of the three default specialists (injection,
+secrets-config, auth-crypto) — PASS only when all three are green on the
+same SHA. Sub-agents do not call MCP coordination tools.
 
 ## Feedback loop
 
