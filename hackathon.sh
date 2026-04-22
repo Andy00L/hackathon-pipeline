@@ -31,6 +31,7 @@ unset _required_file
 SKIP_ULTRAPLAN=false
 WATCH_MODE=false
 ATTACH_MODE=false
+DRY_RUN="${DRY_RUN:-0}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -712,14 +713,16 @@ _cleanup() {
 trap _cleanup EXIT
 
 # ── Lancer auto_setup avant tout le reste ───────────────────────────────────
-auto_setup
-
-# ── Configuration interactive (si nécessaire) ────────────────────────────────
-interactive_config
+if [[ "$DRY_RUN" != "1" ]]; then
+  auto_setup
+  interactive_config
+fi
 
 # ── Charger et valider la configuration ──────────────────────────────────────
 load_config "${SCRIPT_DIR}/hackathon.conf"
-check_prereqs
+if [[ "$DRY_RUN" != "1" ]]; then
+  check_prereqs
+fi
 tg_init
 
 # ── Logging setup ───────────────────────────────────────────────────────────
@@ -731,10 +734,13 @@ mkdir -p "$LOG_DIR"
 PIPELINE_LOG="$LOG_DIR/pipeline.log"
 EVENTS_LOG="$LOG_DIR/events.log"
 
-exec > >(tee -a "$PIPELINE_LOG") 2>&1
+if [[ "$DRY_RUN" != "1" ]]; then
+  exec > >(tee -a "$PIPELINE_LOG") 2>&1
+fi
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') | PIPELINE_START | $HACKATHON_NAME" >> "$EVENTS_LOG"
 
+if [[ "$DRY_RUN" != "1" ]]; then
 # ── Lock file ───────────────────────────────────────────────────────────────
 LOCK_FILE="${PROJECT_DIR}/.pipeline.lock"
 if [[ -f "$LOCK_FILE" ]]; then
@@ -776,9 +782,10 @@ git_checkpoint "setup initial : CLAUDE.md + agents"
 
 tg_send "$(printf '🚀 *Pipeline hackathon lancé*\nProjet : `%s`\nDossier : `%s`' \
   "$HACKATHON_NAME" "$PROJECT_DIR")"
+fi  # end DRY_RUN != 1
 
 # ── Phase 1 : Ultraplan ─────────────────────────────────────────────────────
-if [[ "$SKIP_ULTRAPLAN" == "true" ]]; then
+if [[ "$DRY_RUN" == "1" || "$SKIP_ULTRAPLAN" == "true" ]]; then
   log "INFO" "Ultraplan skipped"
 else
   echo ""
@@ -890,39 +897,59 @@ check_launch_preconditions() {
   log "INFO" "All launch preconditions passed"
 }
 
-check_launch_preconditions
+if [[ "$DRY_RUN" != "1" ]]; then
+  check_launch_preconditions
+fi
 
 # ── Determine MCP Python interpreter (venv preferred) ─────────────────────────
 MCP_PY="${SCRIPT_DIR}/mcp-coord/.venv/bin/python3"
-if [[ ! -x "$MCP_PY" ]]; then
-  if python3 -c "import mcp" 2>/dev/null; then
-    MCP_PY="python3"
-    log "INFO" "Venv unavailable; falling back to system python3 for MCP server"
-  else
-    log "ERROR" "mcp-coord venv not found at ${MCP_PY}."
-    log "ERROR" "Run: cd mcp-coord && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+if [[ "$DRY_RUN" != "1" ]]; then
+  if [[ ! -x "$MCP_PY" ]]; then
+    if python3 -c "import mcp" 2>/dev/null; then
+      MCP_PY="python3"
+      log "INFO" "Venv unavailable; falling back to system python3 for MCP server"
+    else
+      log "ERROR" "mcp-coord venv not found at ${MCP_PY}."
+      log "ERROR" "Run: cd mcp-coord && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+      exit 1
+    fi
+  fi
+  if ! "$MCP_PY" -c "import mcp" 2>/dev/null; then
+    log "ERROR" "mcp module not importable from venv. Re-run pip install -r mcp-coord/requirements.txt inside the venv."
     exit 1
   fi
-fi
-if ! "$MCP_PY" -c "import mcp" 2>/dev/null; then
-  log "ERROR" "mcp module not importable from venv. Re-run pip install -r mcp-coord/requirements.txt inside the venv."
-  exit 1
-fi
-log "INFO" "MCP Python interpreter: ${MCP_PY}"
+  log "INFO" "MCP Python interpreter: ${MCP_PY}"
 
-# ── Update mcp.json to use the correct Python interpreter ─────────────────────
-jq --arg py "$MCP_PY" --arg srv "${SCRIPT_DIR}/mcp-coord/server.py" '
-  .mcpServers."pipeline-coordinator".command = $py |
-  .mcpServers."pipeline-coordinator".args    = [$srv]
-' "${PROJECT_DIR}/.pipeline/mcp.json" > "${PROJECT_DIR}/.pipeline/mcp.json.tmp" && \
-  mv "${PROJECT_DIR}/.pipeline/mcp.json.tmp" "${PROJECT_DIR}/.pipeline/mcp.json"
-log "INFO" "mcp.json updated: command=${MCP_PY}"
+  # ── Update mcp.json to use the correct Python interpreter ─────────────────────
+  jq --arg py "$MCP_PY" --arg srv "${SCRIPT_DIR}/mcp-coord/server.py" '
+    .mcpServers."pipeline-coordinator".command = $py |
+    .mcpServers."pipeline-coordinator".args    = [$srv]
+  ' "${PROJECT_DIR}/.pipeline/mcp.json" > "${PROJECT_DIR}/.pipeline/mcp.json.tmp" && \
+    mv "${PROJECT_DIR}/.pipeline/mcp.json.tmp" "${PROJECT_DIR}/.pipeline/mcp.json"
+  log "INFO" "mcp.json updated: command=${MCP_PY}"
 
-# ── Create pipeline directories ───────────────────────────────────────────────
-mkdir -p "${PROJECT_DIR}/.pipeline/logs"
-mkdir -p "${PROJECT_DIR}/.pipeline/heartbeat"
-mkdir -p "${PROJECT_DIR}/.pipeline/locks"
-mkdir -p "${PROJECT_DIR}/notes"
+  # ── Create pipeline directories ───────────────────────────────────────────────
+  mkdir -p "${PROJECT_DIR}/.pipeline/logs"
+  mkdir -p "${PROJECT_DIR}/.pipeline/heartbeat"
+  mkdir -p "${PROJECT_DIR}/.pipeline/locks"
+  mkdir -p "${PROJECT_DIR}/notes"
+fi
+
+# ── DRY_RUN short-circuit ─────────────────────────────────────────────────────
+# When DRY_RUN=1, print the exact tmux commands that would execute, then exit.
+if [[ "$DRY_RUN" == "1" ]]; then
+  echo "DRY_RUN=1 — printing planned tmux commands (no real session created)"
+  echo ""
+  echo "WINDOW 0 (mcp):       ${MCP_PY} ${SCRIPT_DIR}/mcp-coord/server.py"
+  echo "WINDOW 1 (bootstrap): claude --bare -p <bootstrap.prompt.md> --session-id $(role_session_id bootstrap) --name bootstrap --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --permission-mode default"
+  echo "WINDOW 2 (supervisor): claude --bare -p <supervisor.prompt.md> --session-id $(role_session_id supervisor) --name supervisor --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --permission-mode default"
+  echo "WINDOW 3 (delivery):  claude --bare -p <delivery.prompt.md> --session-id $(role_session_id delivery) --name delivery --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --permission-mode default"
+  echo "WINDOW 4 (security):  claude --bare -p <security.prompt.md> --session-id $(role_session_id security) --name security --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --permission-mode default"
+  echo "WINDOW 5 (quality):   claude --bare -p <quality.prompt.md> --session-id $(role_session_id quality) --name quality --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --permission-mode default"
+  echo ""
+  echo "DRY_RUN complete — exiting without launching tmux."
+  exit 0
+fi
 
 # ── Kill any previous hackathon session ───────────────────────────────────────
 tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
