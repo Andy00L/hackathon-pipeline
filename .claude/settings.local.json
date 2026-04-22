@@ -32,7 +32,8 @@
       "Bash(git:*)",
       "Bash(echo \"EXIT: $?\")",
       "Bash(echo \"case-insensitive old names: $?\")",
-      "Bash(echo \"uiux-designer: $?\")"
+      "Bash(echo \"uiux-designer: $?\")",
+      "Bash(echo \"Exit: $?\")"
     ]
   }
 }
