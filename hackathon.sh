@@ -213,7 +213,9 @@ auto_setup() {
       || echo "  ~ ${plugin} (déjà installé ou indisponible)"
   done
 
-  # UI/UX Pro Max
+  # UI/UX Pro Max (marketplace communautaire)
+  echo "  → marketplace nextlevelbuilder/ui-ux-pro-max-skill..."
+  claude plugin marketplace add nextlevelbuilder/ui-ux-pro-max-skill 2>/dev/null || true
   echo "  → ui-ux-pro-max..."
   claude plugin install ui-ux-pro-max@ui-ux-pro-max-skill 2>/dev/null && \
     echo "  ✓ ui-ux-pro-max" || echo "  ~ ui-ux-pro-max (déjà installé ou erreur)"
@@ -632,7 +634,8 @@ SAFEGUARDS_EOF
       .hooks.PostToolUse = (
         [(.hooks.PostToolUse // [])[], ($sg.hooks.PostToolUse // [])[]]
         | unique_by(.matcher // "")
-      )
+      ) |
+      del(.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
     ' "$settings_file")
     echo "$merged" > "$settings_file"
   else
@@ -690,6 +693,16 @@ CMDEOF
 # ── Charger les bibliothèques ────────────────────────────────────────────────
 source "${SCRIPT_DIR}/lib/utils.sh"
 source "${SCRIPT_DIR}/lib/telegram.sh"
+
+# Deterministic UUIDv5 per role so --session-id is stable across runs
+# and --resume reliably finds the right session.
+role_session_id() {
+  local role="$1"
+  python3 - <<PYEOF "$role"
+import sys, uuid
+print(uuid.uuid5(uuid.NAMESPACE_URL, f"{sys.argv[1]}.pipeline.hackathon"))
+PYEOF
+}
 
 # ── Cleanup trap ─────────────────────────────────────────────────────────────
 _cleanup() {
@@ -831,6 +844,20 @@ check_launch_preconditions() {
     log "ERROR" "mcp-coord/requirements.txt not found"; errors=$((errors + 1))
   fi
 
+  # Ensure project .pipeline directory exists and holds a copy of the MCP
+  # config template. The launcher jq-patches this copy with the venv Python
+  # path; the repo's version is the clean template.
+  mkdir -p "${PROJECT_DIR}/.pipeline"
+  if [[ ! -f "${PROJECT_DIR}/.pipeline/mcp.json" ]]; then
+    if [[ ! -f "${SCRIPT_DIR}/.pipeline/mcp.json" ]]; then
+      log "ERROR" "Template mcp.json missing at ${SCRIPT_DIR}/.pipeline/mcp.json"
+      errors=$((errors + 1))
+    else
+      cp "${SCRIPT_DIR}/.pipeline/mcp.json" "${PROJECT_DIR}/.pipeline/mcp.json"
+      log "INFO" "Copied mcp.json template into ${PROJECT_DIR}/.pipeline/"
+    fi
+  fi
+
   if ! jq empty "${PROJECT_DIR}/.pipeline/mcp.json" 2>/dev/null; then
     log "ERROR" ".pipeline/mcp.json is not valid JSON"; errors=$((errors + 1))
   fi
@@ -911,6 +938,9 @@ launch_claude_window() {
   local prompt_file="$2"
   local log_file="${PROJECT_DIR}/.pipeline/logs/${role}.jsonl"
 
+  local session_uuid
+  session_uuid=$(role_session_id "$role")
+
   local cmd_file
   cmd_file=$(mktemp "/tmp/hackathon-${role}-XXXXXX.sh")
   chmod +x "$cmd_file"
@@ -922,6 +952,7 @@ rm -f '${cmd_file}'
 cd '${PROJECT_DIR}'
 PROMPT=\$(<'${prompt_file}')
 exec claude --bare -p "\$PROMPT" \\
+  --session-id '${session_uuid}' \\
   --name '${role}' \\
   --model '${CLAUDE_MODEL}' --effort '${CLAUDE_EFFORT}' \\
   --mcp-config '${PROJECT_DIR}/.pipeline/mcp.json' \\
@@ -1043,7 +1074,9 @@ respawn_mcp() {
 respawn_role() {
   local role="$1"
   local log_file="${PROJECT_DIR}/.pipeline/logs/${role}.jsonl"
-  local cmd="cd '${PROJECT_DIR}' && exec claude --resume '${role}' --bare \
+  local session_uuid
+  session_uuid=$(role_session_id "$role")
+  local cmd="cd '${PROJECT_DIR}' && exec claude --resume '${session_uuid}' --bare --name '${role}' \
     -p 'Session resumed after interruption. Continue your orchestrator role.' \
     --model '${CLAUDE_MODEL}' --effort '${CLAUDE_EFFORT}' \
     --mcp-config '${PROJECT_DIR}/.pipeline/mcp.json' \
