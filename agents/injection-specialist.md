@@ -26,19 +26,31 @@ Never scan files outside the diff.
 Check for each of these in the changed code:
 
 1. **SQL Injection** (OWASP A03): string concatenation in SQL queries,
-   unparameterized queries, dynamic table/column names from user input
-2. **XSS**: raw HTML injection props (React/Vue/Angular), innerHTML, v-html,
-   DOM write methods, unescaped template interpolation with user data
-3. **Command Injection**: shell invocations (spawn, system, child_process)
-   with user-controlled input, unsanitized shell arguments
+   unparameterized queries, dynamic table/column names from user input.
+   Tell-tale: SELECT .* FROM with concatenated user input.
+
+2. **XSS**: dangerouslySetInnerHTML without sanitization, innerHTML
+   assignments, document.write calls, v-html directives, unescaped template
+   interpolation with user data, <iframe with user-controlled src
+
+3. **Command Injection**: eval() or exec() invocations with user-controlled
+   input, spawn/system/child_process with unsanitized arguments
+
 4. **Path Traversal**: file access using user input without path normalization,
-   ../.. sequences not blocked
+   ../ sequences not blocked, directory escape via encoded traversal
+
 5. **SSRF** (OWASP A10): user-controlled URLs in fetch/axios/http requests
    without allowlist validation
+
 6. **XXE**: XML parsing without disabling external entities
-7. **Open Redirect**: redirect URLs from user input without domain validation
+
+7. **Open Redirect**: redirect URLs from user input without domain validation,
+   javascript: scheme in redirect targets
+
 8. **Template Injection**: user input in template strings evaluated server-side
+
 9. **CSRF**: state-changing endpoints without CSRF tokens (POST/PUT/DELETE)
+
 10. **Broken Access Control** (OWASP A01): missing authorization checks on
     sensitive endpoints, IDOR patterns
 

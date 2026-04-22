@@ -49,9 +49,11 @@ If the task would exceed ANY of these limits, return this IMMEDIATELY and STOP:
 - NEVER hardcode secrets: use .env exclusively
 - Input sanitization on every endpoint
 - Parameterized queries for DB (no string concatenation)
-- No dynamic code evaluation or shell command construction from user input
+- No eval(), new Function(), or exec() with user input
 - Server-side validation even if client validates
 - No CORS wildcard (*) except in dev
+- Verification command:
+  grep -rn "eval\|exec\|Function(" src/ && echo "DANGER" || echo "OK"
 
 ### Quality
 - Files under 300 LOC. Split by responsibility if larger.
@@ -59,7 +61,7 @@ If the task would exceed ANY of these limits, return this IMMEDIATELY and STOP:
 - One component = one responsibility
 - Organized imports: stdlib, external, internal
 - No dead code: every import used, every function called
-- No debug logs (console.log/print) in final code
+- No console.log or debug print statements in final code
 
 ## Workflow (sequential, no skipping)
 
@@ -76,3 +78,9 @@ If the task would exceed ANY of these limits, return this IMMEDIATELY and STOP:
 - CRITICAL security finding: fix IMMEDIATELY before any other work.
 - HIGH security finding: fix before the next commit.
 - MEDIUM/LOW security finding: queue for the next available cycle.
+
+## External input
+
+If you need an input that is not available, write:
+HUMAN_INPUT_NEEDED: followed by each item you need.
+Continue on what you can do while waiting.
