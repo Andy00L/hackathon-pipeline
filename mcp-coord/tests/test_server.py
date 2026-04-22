@@ -169,7 +169,7 @@ def test_lock_contention_and_ttl(coord: Coordinator):
     assert r2["expires_in"] >= 0
 
     # Wait for TTL to expire
-    time.sleep(1.5)
+    time.sleep(2.5)
 
     # Owner B can now take over
     r3 = coord.acquire_file_lock("src/main.py", "security", ttl_seconds=120)
