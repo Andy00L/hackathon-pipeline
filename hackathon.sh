@@ -942,11 +942,11 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo "DRY_RUN=1 — printing planned tmux commands (no real session created)"
   echo ""
   echo "WINDOW 0 (mcp):       ${MCP_PY} ${SCRIPT_DIR}/mcp-coord/server.py"
-  echo "WINDOW 1 (bootstrap): claude --bare -p <bootstrap.prompt.md> --session-id $(role_session_id bootstrap) --name bootstrap --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
-  echo "WINDOW 2 (supervisor): claude --bare -p <supervisor.prompt.md> --session-id $(role_session_id supervisor) --name supervisor --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
-  echo "WINDOW 3 (delivery):  claude --bare -p <delivery.prompt.md> --session-id $(role_session_id delivery) --name delivery --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
-  echo "WINDOW 4 (security):  claude --bare -p <security.prompt.md> --session-id $(role_session_id security) --name security --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
-  echo "WINDOW 5 (quality):   claude --bare -p <quality.prompt.md> --session-id $(role_session_id quality) --name quality --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
+  echo "WINDOW 1 (bootstrap): claude -p <bootstrap.prompt.md> --session-id $(role_session_id bootstrap) --name bootstrap --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
+  echo "WINDOW 2 (supervisor): claude -p <supervisor.prompt.md> --session-id $(role_session_id supervisor) --name supervisor --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
+  echo "WINDOW 3 (delivery):  claude -p <delivery.prompt.md> --session-id $(role_session_id delivery) --name delivery --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
+  echo "WINDOW 4 (security):  claude -p <security.prompt.md> --session-id $(role_session_id security) --name security --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
+  echo "WINDOW 5 (quality):   claude -p <quality.prompt.md> --session-id $(role_session_id quality) --name quality --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
   echo ""
   echo "DRY_RUN complete — exiting without launching tmux."
   exit 0
@@ -979,7 +979,7 @@ set -uo pipefail
 rm -f '${cmd_file}'
 cd '${PROJECT_DIR}'
 PROMPT=\$(<'${prompt_file}')
-exec claude --bare -p "\$PROMPT" \\
+exec claude -p "\$PROMPT" \\
   --session-id '${session_uuid}' \\
   --name '${role}' \\
   --model '${CLAUDE_MODEL}' --effort '${CLAUDE_EFFORT}' \\
@@ -1104,7 +1104,7 @@ respawn_role() {
   local log_file="${PROJECT_DIR}/.pipeline/logs/${role}.jsonl"
   local session_uuid
   session_uuid=$(role_session_id "$role")
-  local cmd="cd '${PROJECT_DIR}' && exec claude --resume '${session_uuid}' --bare --name '${role}' \
+  local cmd="cd '${PROJECT_DIR}' && exec claude --resume '${session_uuid}' --name '${role}' \
     -p 'Session resumed after interruption. Continue your orchestrator role.' \
     --model '${CLAUDE_MODEL}' --effort '${CLAUDE_EFFORT}' \
     --mcp-config '${PROJECT_DIR}/.pipeline/mcp.json' \
