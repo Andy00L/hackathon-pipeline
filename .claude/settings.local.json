@@ -33,7 +33,12 @@
       "Bash(echo \"EXIT: $?\")",
       "Bash(echo \"case-insensitive old names: $?\")",
       "Bash(echo \"uiux-designer: $?\")",
-      "Bash(echo \"Exit: $?\")"
+      "Bash(echo \"Exit: $?\")",
+      "Bash(claude --version)",
+      "Read(//usr/bin/**)",
+      "Bash(/home/drew/pipeline_hack/mcp-coord/.venv/bin/python3 -c \"import mcp; print\\('mcp importable'\\)\")",
+      "Bash(shellcheck hackathon.sh)",
+      "Bash(shellcheck:*)"
     ]
   }
 }
