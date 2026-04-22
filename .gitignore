@@ -15,7 +15,6 @@ logs/
 .pipeline/locks/
 .pipeline/verdicts.jsonl
 .pipeline/state.json
-.pipeline/mcp.json
 notes/PACKAGES.md
 notes/BRIEF-DISTILLED.md
 __pycache__/
