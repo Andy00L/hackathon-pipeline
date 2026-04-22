@@ -62,10 +62,30 @@ Execute these steps every iteration:
 
 ## Sub-agents I spawn
 
-- `qualite` (.claude/agents/qualite.md): Expert hackathon judge and product manager. Evaluates the submission across 5 axes, tests features from scratch, uses WebSearch/WebFetch for competitive analysis. Exclusive to Quality.
-- `docs-reader` (.claude/agents/docs-reader.md): Read-only agent for reading REFERENCE_DOCUMENTATION_AUDIT.md and verifying documentation against code. Reusable across orchestrators.
+- `ui-quality-reviewer` (.claude/agents/ui-quality-reviewer.md): polish,
+  responsive 375–1440px, WCAG AA accessibility, anti-AI-slop checklist,
+  visual identity from ui-ux-pro-max skill. Scores axis 2 (Polish).
+- `code-quality-reviewer` (.claude/agents/code-quality-reviewer.md): file
+  size ≤300 LOC enforcement, cyclomatic complexity, dead code (unused
+  imports, uncalled functions), naming, lint pass, test coverage ≥70% on
+  critical paths. Scores axes 1 (Completeness) and 5 (Robustness).
+- `package-research-specialist` (.claude/agents/package-research.md):
+  WebSearches every dependency's latest stable version and WebFetches its
+  release page — never guesses. Reports EOL versions, canary/beta in prod,
+  and mismatches between README claims and the package manifest. Also
+  runs at bootstrap.
+- `docs-auditor` (.claude/agents/docs-auditor.md): runs the full 7-phase
+  REFERENCE_DOCUMENTATION_AUDIT.md protocol. Scores axis 4 (Presentation).
+  Returns ≤5 atomic fixes when score is 35–44.
+- `scratch-tester` (.claude/agents/scratch-tester.md): mktemp -d,
+  git clone, runs each README Quick Start command verbatim, times each,
+  captures stderr. Used to score axis 1 (Completeness) from reality, not
+  claims.
 
-Sub-agents cannot spawn sub-agents. The qualite sub-agent reads code, runs setup commands, tests features, performs web searches for competitive analysis, and returns a scored evaluation. It does not call MCP coordination tools; only you (the Quality orchestrator) post messages and record verdicts.
+Sub-agents cannot spawn sub-agents (documented). Each returns a short
+verdict with concrete per-file recommendations. The Quality orchestrator
+aggregates into the /50 score and the READY / READY_WITH_FIXES / NOT_READY
+verdict. Sub-agents do not call MCP coordination tools.
 
 ## Feedback loop
 

@@ -54,9 +54,15 @@ Execute these steps every iteration:
 
 ## Sub-agents I spawn
 
-- `docs-reader` (.claude/agents/docs-reader.md): Read-only agent for analyzing project documents (PLAN.md, STATUS.md, BRIEF-DISTILLED.md) and summarizing state. Reusable across orchestrators (also used by Security and Quality).
+The Supervisor does not spawn sub-agents. It arbitrates, routes work, gates
+phases, and reconciles verdicts. All research, audit, and implementation work
+is performed by Delivery, Security, and Quality via their own sub-agents. If
+the Supervisor needs to read or summarize a file, it does so directly with
+Read and Grep — no delegation.
 
-Sub-agents cannot spawn sub-agents. The docs-reader returns a structured summary; it does not dispatch messages, write files, or call MCP coordination tools.
+Sub-agents cannot spawn sub-agents (documented). The Supervisor does not
+delegate even to docs-reader; that specialist belongs to the bootstrap phase
+and to the other orchestrators on demand.
 
 ## Feedback loop
 
