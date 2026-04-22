@@ -184,7 +184,8 @@ auto_setup() {
   if ! sudo -n true 2>/dev/null; then
     echo "  → Configuration de NOPASSWD sudo (apt-get seulement)..."
     echo "    (dernière fois qu'un mot de passe sudo sera demandé)"
-    local sudoers_file="/etc/sudoers.d/hackathon-$(whoami)"
+    local sudoers_file
+    sudoers_file="/etc/sudoers.d/hackathon-$(whoami)"
     echo "$(whoami) ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /bin/mkdir, /usr/bin/tee, /bin/chmod" \
       | sudo tee "$sudoers_file" > /dev/null
     sudo chmod 0440 "$sudoers_file"
@@ -212,9 +213,8 @@ auto_setup() {
       || echo "  ~ ${plugin} (déjà installé ou indisponible)"
   done
 
-  # UI/UX Pro Max (marketplace communautaire)
-  echo "  → marketplace nextlevelbuilder/ui-ux-pro-max-skill..."
-  claude plugin marketplace add nextlevelbuilder/ui-ux-pro-max-skill 2>/dev/null || true
+  # UI/UX Pro Max
+  echo "  → ui-ux-pro-max..."
   claude plugin install ui-ux-pro-max@ui-ux-pro-max-skill 2>/dev/null && \
     echo "  ✓ ui-ux-pro-max" || echo "  ~ ui-ux-pro-max (déjà installé ou erreur)"
 
@@ -632,8 +632,7 @@ SAFEGUARDS_EOF
       .hooks.PostToolUse = (
         [(.hooks.PostToolUse // [])[], ($sg.hooks.PostToolUse // [])[]]
         | unique_by(.matcher // "")
-      ) |
-      del(.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
+      )
     ' "$settings_file")
     echo "$merged" > "$settings_file"
   else
@@ -695,7 +694,7 @@ source "${SCRIPT_DIR}/lib/telegram.sh"
 # ── Cleanup trap ─────────────────────────────────────────────────────────────
 _cleanup() {
   rm -f "${LOCK_FILE:-}" 2>/dev/null || true
-  rm -f /tmp/hackathon-cmd-*.sh /tmp/hackathon-prompt-*.txt 2>/dev/null || true
+  rm -f /tmp/hackathon-cmd-*.sh /tmp/hackathon-prompt-*.txt /tmp/hackathon-*-??????.sh 2>/dev/null || true
 }
 trap _cleanup EXIT
 
@@ -717,7 +716,6 @@ LOG_DIR="${SCRIPT_DIR}/logs/${log_slug}"
 mkdir -p "$LOG_DIR"
 
 PIPELINE_LOG="$LOG_DIR/pipeline.log"
-CLAUDE_LOG="$LOG_DIR/claude-output.log"
 EVENTS_LOG="$LOG_DIR/events.log"
 
 exec > >(tee -a "$PIPELINE_LOG") 2>&1
@@ -814,131 +812,449 @@ else
   git_checkpoint "ultraplan approuvé"
 fi
 
-# ── Phase 2 : Agent Teams dans tmux ─────────────────────────────────────────
+# ── Phase 2 : 6-Window Parallel Orchestration ─────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════════════"
-echo "  ÉTAPE 2 : LANCEMENT AGENT TEAMS"
+echo "  ÉTAPE 2 : ORCHESTRATION PARALLÈLE (6 fenêtres)"
 echo "════════════════════════════════════════════════════"
 echo ""
 
-# Tuer une session existante si elle existe
-tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+# ── Precondition checks ───────────────────────────────────────────────────────
+check_launch_preconditions() {
+  local errors=0
 
-# Construire la commande Claude
-CLAUDE_CMD="claude --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT}"
+  if [[ ! -f "${SCRIPT_DIR}/mcp-coord/server.py" ]]; then
+    log "ERROR" "mcp-coord/server.py not found"; errors=$((errors + 1))
+  fi
 
-# Ajouter Telegram channel si configuré
-if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
-  CLAUDE_CMD+=" --channels plugin:telegram@claude-plugins-official"
-fi
+  if [[ ! -f "${SCRIPT_DIR}/mcp-coord/requirements.txt" ]]; then
+    log "ERROR" "mcp-coord/requirements.txt not found"; errors=$((errors + 1))
+  fi
 
-# Créer le prompt initial — PAS de parenthèses ni de caractères spéciaux bash
-INITIAL_PROMPT='Lis CLAUDE.md attentivement.
-Tu es le Lead du hackathon. Commence MAINTENANT.
-1. Phase de recherche competitive via WebSearch et WebFetch, sauvegarde dans docs/COMPETITIVE-ANALYSIS.md
-2. Si docs/PLAN.md existe, utilise-le comme base. Sinon, cree ton propre plan dans docs/PLAN.md.
-3. Cree ton equipe de 4 teammates - Architecte, Implementeur, Securite, Qualite. Fichiers agents dans .claude/agents/.
-4. Coordonne le travail. Itere sans limite. Objectif score qualite 45/50 minimum et securite PASS.
-5. Quand le consensus est atteint, tag, zip, notifie.
-La qualite est la SEULE priorite. Pas de compromis.'
+  if ! jq empty "${PROJECT_DIR}/.pipeline/mcp.json" 2>/dev/null; then
+    log "ERROR" ".pipeline/mcp.json is not valid JSON"; errors=$((errors + 1))
+  fi
 
-# Prompt de relance — utilisé par le watchdog si la session crash
-RESTART_PROMPT='Session interrompue. Lis CLAUDE.md et docs/ pour comprendre le contexte. Verifie git log. Reprends le travail. Continue sans limite.'
+  local role
+  for role in supervisor delivery security quality; do
+    if [[ ! -f "${SCRIPT_DIR}/.claude/orchestrators/${role}.prompt.md" ]]; then
+      log "ERROR" "Missing orchestrator: .claude/orchestrators/${role}.prompt.md"
+      errors=$((errors + 1))
+    fi
+  done
 
-# Lancer Claude dans tmux (avec retry si échec de démarrage)
-launch_attempts=0
-while ! launch_claude_in_tmux "$INITIAL_PROMPT" "$TMUX_SESSION" "$PROJECT_DIR" "$CLAUDE_CMD"; do
-  launch_attempts=$((launch_attempts + 1))
-  if (( launch_attempts >= 3 )); then
-    log "ERROR" "Claude n'a pas démarré après 3 tentatives. Abandon."
-    tg_send "❌ Claude n'a pas pu démarrer après 3 tentatives."
+  local agent_count=0 f
+  for f in "${SCRIPT_DIR}"/agents/*.md; do
+    [[ -f "$f" ]] && agent_count=$((agent_count + 1))
+  done
+  if (( agent_count < 15 )); then
+    log "ERROR" "Expected >=15 agent .md files in agents/, found ${agent_count}"
+    errors=$((errors + 1))
+  fi
+
+  if ! claude --version &>/dev/null; then
+    log "ERROR" "claude --version failed"; errors=$((errors + 1))
+  fi
+
+  if (( errors > 0 )); then
+    log "ERROR" "${errors} precondition(s) failed. Cannot launch."
     exit 1
   fi
-  log "WARN" "Claude n'a pas démarré. Retry ${launch_attempts}/3..."
+  log "INFO" "All launch preconditions passed"
+}
+
+check_launch_preconditions
+
+# ── Determine MCP Python interpreter (venv preferred) ─────────────────────────
+MCP_PY="${SCRIPT_DIR}/mcp-coord/.venv/bin/python3"
+if [[ ! -x "$MCP_PY" ]]; then
+  if python3 -c "import mcp" 2>/dev/null; then
+    MCP_PY="python3"
+    log "INFO" "Venv unavailable; falling back to system python3 for MCP server"
+  else
+    log "ERROR" "mcp-coord venv not found at ${MCP_PY}."
+    log "ERROR" "Run: cd mcp-coord && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+    exit 1
+  fi
+fi
+if ! "$MCP_PY" -c "import mcp" 2>/dev/null; then
+  log "ERROR" "mcp module not importable from venv. Re-run pip install -r mcp-coord/requirements.txt inside the venv."
+  exit 1
+fi
+log "INFO" "MCP Python interpreter: ${MCP_PY}"
+
+# ── Update mcp.json to use the correct Python interpreter ─────────────────────
+jq --arg py "$MCP_PY" --arg srv "${SCRIPT_DIR}/mcp-coord/server.py" '
+  .mcpServers."pipeline-coordinator".command = $py |
+  .mcpServers."pipeline-coordinator".args    = [$srv]
+' "${PROJECT_DIR}/.pipeline/mcp.json" > "${PROJECT_DIR}/.pipeline/mcp.json.tmp" && \
+  mv "${PROJECT_DIR}/.pipeline/mcp.json.tmp" "${PROJECT_DIR}/.pipeline/mcp.json"
+log "INFO" "mcp.json updated: command=${MCP_PY}"
+
+# ── Create pipeline directories ───────────────────────────────────────────────
+mkdir -p "${PROJECT_DIR}/.pipeline/logs"
+mkdir -p "${PROJECT_DIR}/.pipeline/heartbeat"
+mkdir -p "${PROJECT_DIR}/.pipeline/locks"
+mkdir -p "${PROJECT_DIR}/notes"
+
+# ── Kill any previous hackathon session ───────────────────────────────────────
+tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+
+# ── Helper: launch a claude orchestrator as a tmux window ─────────────────────
+# Creates a temp launcher script that reads the prompt file at runtime and
+# passes its content to claude -p. Variable expansion in bash does not
+# recursively interpret shell metacharacters, so backticks and $ signs
+# inside the prompt markdown are safe inside "$PROMPT".
+# Usage: launch_claude_window <role> <prompt_file>
+launch_claude_window() {
+  local role="$1"
+  local prompt_file="$2"
+  local log_file="${PROJECT_DIR}/.pipeline/logs/${role}.jsonl"
+
+  local cmd_file
+  cmd_file=$(mktemp "/tmp/hackathon-${role}-XXXXXX.sh")
+  chmod +x "$cmd_file"
+
+  cat > "$cmd_file" <<LAUNCHER_EOF
+#!/bin/bash
+set -uo pipefail
+rm -f '${cmd_file}'
+cd '${PROJECT_DIR}'
+PROMPT=\$(<'${prompt_file}')
+exec claude --bare -p "\$PROMPT" \\
+  --name '${role}' \\
+  --model '${CLAUDE_MODEL}' --effort '${CLAUDE_EFFORT}' \\
+  --mcp-config '${PROJECT_DIR}/.pipeline/mcp.json' \\
+  --output-format stream-json \\
+  --permission-mode default
+LAUNCHER_EOF
+
+  tmux new-window -t "${TMUX_SESSION}" -n "${role}" "${cmd_file}"
+  tmux pipe-pane -t "${TMUX_SESSION}:${role}" -o "tee -a '${log_file}'"
+  log "INFO" "Launched window '${role}'"
+}
+
+# ── Launch-phase cleanup (Ctrl+C while windows are starting) ──────────────────
+_launch_phase_cleanup() {
+  log "WARN" "Interrupted during launch phase — cleaning up"
+  local i
+  for i in 0 1 2 3 4 5; do
+    tmux kill-window -t "${TMUX_SESSION}:${i}" 2>/dev/null || true
+  done
   tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-  sleep 5
-done
+}
+trap _launch_phase_cleanup SIGINT SIGTERM
 
-# Activer le logging temps réel de la session tmux
-LIVE_LOG="${PROJECT_DIR}/.pipeline-live.log"
-: > "$LIVE_LOG"
-tmux pipe-pane -t "$TMUX_SESSION" -o "tee -a ${CLAUDE_LOG} >> ${LIVE_LOG}"
-log "INFO" "Logging temps réel activé : ${LIVE_LOG}"
+# ── Launch 6 tmux windows ─────────────────────────────────────────────────────
 
-log "INFO" "Agent Teams lancé dans tmux session '${TMUX_SESSION}'"
-tg_send "$(printf '🤖 *Agent Teams lancé*\n5 agents Opus au travail.\nSession tmux : `%s`\nJe te ping si j'\''ai besoin de toi.' \
+# window 0 : MCP coordination server
+log "INFO" "Launching window 0 (mcp)"
+tmux new-session -d -s "$TMUX_SESSION" -n mcp \
+  "cd '${PROJECT_DIR}' && exec '${MCP_PY}' '${SCRIPT_DIR}/mcp-coord/server.py' \
+   >> '${PROJECT_DIR}/.pipeline/mcp-server.stdout' \
+   2>> '${PROJECT_DIR}/.pipeline/mcp-server.stderr'"
+
+# Brief pause so the MCP server can bind its port before clients connect
+sleep 2
+
+# window 1 : bootstrap (one-shot — exits after producing research artefacts)
+launch_claude_window "bootstrap" \
+  "${SCRIPT_DIR}/.claude/orchestrators/bootstrap.prompt.md"
+
+# window 2 : supervisor
+launch_claude_window "supervisor" \
+  "${SCRIPT_DIR}/.claude/orchestrators/supervisor.prompt.md"
+
+# window 3 : delivery
+launch_claude_window "delivery" \
+  "${SCRIPT_DIR}/.claude/orchestrators/delivery.prompt.md"
+
+# window 4 : security
+launch_claude_window "security" \
+  "${SCRIPT_DIR}/.claude/orchestrators/security.prompt.md"
+
+# window 5 : quality
+launch_claude_window "quality" \
+  "${SCRIPT_DIR}/.claude/orchestrators/quality.prompt.md"
+
+log "INFO" "All 6 windows launched in tmux session '${TMUX_SESSION}'"
+tg_send "$(printf '🤖 *Orchestration parallèle lancée*\n6 fenêtres tmux actives.\nSession : `%s`' \
   "$TMUX_SESSION")"
 
 echo ""
 echo "════════════════════════════════════════════════════"
-echo "  Pipeline actif dans tmux"
+echo "  Pipeline actif dans tmux (6 fenêtres)"
 echo ""
 echo "  Pour voir :    tmux attach -t ${TMUX_SESSION}"
 echo "  Pour détacher : Ctrl+B puis D"
 echo "  Pour watch :   ./hackathon.sh --watch"
-echo "  Pour monitorer : Telegram"
 echo ""
-echo "  La session continue même si tu fermes ce terminal."
-echo "  Claude itère sans limite jusqu'au consensus."
+echo "  Fenêtres : mcp | bootstrap | supervisor |"
+echo "             delivery | security | quality"
 echo "════════════════════════════════════════════════════"
 echo ""
 
-# ── Boucle de surveillance (optionnelle) ─────────────────────────────────────
-# Vérifie que la session tmux est toujours vivante
-# Si elle crash, la relance avec --resume
+# ── Watchdog helpers ──────────────────────────────────────────────────────────
 
-echo "Surveillance active. Ctrl+C pour quitter (la session tmux continue)."
+check_window_alive() {
+  tmux list-windows -t "$TMUX_SESSION" -F '#W' 2>/dev/null | grep -qx "$1"
+}
+
+check_pane_dead() {
+  local dead
+  dead=$(tmux display-message -t "${TMUX_SESSION}:$1" -p '#{pane_dead}' 2>/dev/null) || return 1
+  [[ "$dead" == "1" ]]
+}
+
+get_pane_exit_code() {
+  tmux display-message -t "${TMUX_SESSION}:$1" -p '#{pane_dead_status}' 2>/dev/null || echo ""
+}
+
+check_heartbeat_fresh() {
+  local hb_file="${PROJECT_DIR}/.pipeline/heartbeat/$1.txt"
+  [[ -f "$hb_file" ]] || return 1
+  local mtime now
+  mtime=$(stat -c %Y "$hb_file" 2>/dev/null) || return 1
+  now=$(date +%s)
+  (( (now - mtime) < 120 ))
+}
+
+check_mcp_memory() {
+  local pid
+  pid=$(tmux display-message -t "${TMUX_SESSION}:mcp" -p '#{pane_pid}' 2>/dev/null) || return 0
+  if [[ -n "$pid" ]] && [[ -f "/proc/${pid}/status" ]]; then
+    local vmrss
+    vmrss=$(awk '/^VmRSS:/ {print $2}' "/proc/${pid}/status" 2>/dev/null) || return 0
+    if [[ -n "$vmrss" ]] && (( vmrss > 1048576 )); then
+      log "WARN" "MCP server memory: ${vmrss}KB (>1GB)"
+    fi
+  fi
+}
+
+respawn_mcp() {
+  log "INFO" "Respawning MCP server"
+  tmux respawn-window -k -t "${TMUX_SESSION}:mcp" \
+    "cd '${PROJECT_DIR}' && exec '${MCP_PY}' '${SCRIPT_DIR}/mcp-coord/server.py' \
+     >> '${PROJECT_DIR}/.pipeline/mcp-server.stdout' \
+     2>> '${PROJECT_DIR}/.pipeline/mcp-server.stderr'"
+  sleep 2
+}
+
+respawn_role() {
+  local role="$1"
+  local log_file="${PROJECT_DIR}/.pipeline/logs/${role}.jsonl"
+  local cmd="cd '${PROJECT_DIR}' && exec claude --resume '${role}' --bare \
+    -p 'Session resumed after interruption. Continue your orchestrator role.' \
+    --model '${CLAUDE_MODEL}' --effort '${CLAUDE_EFFORT}' \
+    --mcp-config '${PROJECT_DIR}/.pipeline/mcp.json' \
+    --output-format stream-json --permission-mode default"
+
+  if check_window_alive "$role"; then
+    tmux respawn-window -k -t "${TMUX_SESSION}:${role}" "$cmd"
+  else
+    tmux new-window -t "${TMUX_SESSION}" -n "${role}" "$cmd"
+  fi
+  tmux pipe-pane -t "${TMUX_SESSION}:${role}" -o "tee -a '${log_file}'"
+  log "INFO" "Respawned ${role} via --resume"
+}
+
+# ── Graceful shutdown handler (SIGINT / SIGTERM) ──────────────────────────────
+graceful_shutdown() {
+  log "INFO" "Shutdown signal received — requesting graceful stop"
+
+  if [[ -f "${SCRIPT_DIR}/mcp-coord/client_helper.py" ]]; then
+    "$MCP_PY" "${SCRIPT_DIR}/mcp-coord/client_helper.py" post_message \
+      --from user --to supervisor --topic shutdown 2>/dev/null || true
+  fi
+
+  local deadline
+  deadline=$(( $(date +%s) + 120 ))
+  while (( $(date +%s) < deadline )); do
+    local alive=0 r
+    for r in supervisor delivery security quality; do
+      if check_window_alive "$r"; then
+        alive=$((alive + 1))
+      fi
+    done
+    if (( alive == 0 )); then
+      log "INFO" "All orchestrators exited gracefully"
+      break
+    fi
+    sleep 5
+  done
+
+  tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  rm -f "${PROJECT_DIR}/.pipeline/locks/"* 2>/dev/null || true
+
+  log "INFO" "Pipeline shutdown complete"
+  tg_send "Pipeline arrêté proprement"
+  exit 0
+}
+
+# Switch from launch-phase trap to watchdog trap
+trap graceful_shutdown SIGINT SIGTERM
+
+# ── Per-role watchdog with exponential backoff ────────────────────────────────
+# Every 30s: check each role's window, pane liveness, and heartbeat freshness.
+# Respawn dead roles via claude --resume. Backoff: 30 → 60 → 120 → 300s.
+# Exit code 42 = context-pressure checkpoint → immediate resume, no backoff.
+# Bootstrap is one-shot (exit 0 expected). MCP is restarted first if down.
+
+echo "Surveillance active (6 fenêtres). Ctrl+C pour arrêt propre."
 echo ""
 
-restart_count=0
-sleep_interval=60
-last_restart_ts=0
+ORCHESTRATOR_ROLES=(supervisor delivery security quality)
+BOOTSTRAP_DONE=false
+WATCHDOG_START=$(date +%s)
+HB_GRACE_UNTIL=$((WATCHDOG_START + 60))
+
+declare -A ROLE_BACKOFF
+declare -A ROLE_LAST_RESTART
+declare -A ROLE_STABLE_SINCE
+
+for _wd_role in "${ORCHESTRATOR_ROLES[@]}"; do
+  ROLE_BACKOFF[$_wd_role]=30
+  ROLE_LAST_RESTART[$_wd_role]=0
+  ROLE_STABLE_SINCE[$_wd_role]=$WATCHDOG_START
+done
 
 while true; do
-  sleep "$sleep_interval"
+  sleep 30
 
+  now=$(date +%s)
+
+  # ── Session-level check ─────────────────────────────────────────────────
   if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    log "WARN" "Session tmux terminée ou crashée"
+    log "ERROR" "tmux session '${TMUX_SESSION}' gone — exiting watchdog"
+    break
+  fi
 
-    # Vérifier si c'est une terminaison normale (hackathon fini)
-    if [[ -f "${PROJECT_DIR}/docs/QUALITY-REPORT.md" ]]; then
-      if grep -qi "READY" "${PROJECT_DIR}/docs/QUALITY-REPORT.md" 2>/dev/null; then
-        log "INFO" "Le hackathon semble terminé (READY trouvé dans QUALITY-REPORT.md)"
-        tg_send "✅ *Pipeline terminé normalement*"
-        exit 0
-      fi
-    fi
-
-    # Crash — relancer avec backoff exponentiel
-    restart_count=$((restart_count + 1))
-    sleep_interval=$((60 * (2 ** (restart_count - 1))))
-    if (( sleep_interval > 300 )); then sleep_interval=300; fi
-
-    log "WARN" "Relance de la session (tentative ${restart_count}, prochain check dans ${sleep_interval}s)..."
-    tg_send "⚠️ Session interrompue. Relance automatique..."
-
-    if launch_claude_in_tmux "$RESTART_PROMPT" "$TMUX_SESSION" "$PROJECT_DIR" "$CLAUDE_CMD"; then
-      tmux pipe-pane -t "$TMUX_SESSION" -o "tee -a ${CLAUDE_LOG} >> ${LIVE_LOG}"
-      log "INFO" "Session relancée"
-      tg_send "🔄 Session relancée avec succès"
-    else
-      log "ERROR" "Claude n'a pas démarré après relance. Retry au prochain cycle."
-      tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-      tg_send "❌ Claude n'a pas pu redémarrer. Retry au prochain cycle."
-    fi
-    last_restart_ts=$(date +%s)
+  # ── MCP server (check first — orchestrators depend on it) ──────────────
+  if ! check_window_alive "mcp" || check_pane_dead "mcp"; then
+    log "WARN" "MCP server down — restarting before orchestrators"
+    respawn_mcp
   else
-    # Session vivante — réinitialiser après 5+ min de stabilité
-    if (( restart_count > 0 && last_restart_ts > 0 )); then
-      now=$(date +%s)
-      if (( now - last_restart_ts > 300 )); then
-        restart_count=0
-        sleep_interval=60
-        last_restart_ts=0
-        log "INFO" "Session stable depuis 5+ min, compteur de relance réinitialisé"
-      fi
-    else
-      sleep_interval=60
+    check_mcp_memory
+  fi
+
+  # ── Bootstrap (one-shot; graceful exit is success, not a crash) ─────────
+  if [[ "$BOOTSTRAP_DONE" == "false" ]]; then
+    if ! check_window_alive "bootstrap" || check_pane_dead "bootstrap"; then
+      BOOTSTRAP_DONE=true
+      log "INFO" "Bootstrap exited (expected one-shot completion)"
     fi
+  fi
+
+  # ── Orchestrator roles ──────────────────────────────────────────────────
+  all_exited=true
+  for wd_role in "${ORCHESTRATOR_ROLES[@]}"; do
+
+    # — Window gone entirely —
+    if ! check_window_alive "$wd_role"; then
+      current_backoff=${ROLE_BACKOFF[$wd_role]}
+      last_restart=${ROLE_LAST_RESTART[$wd_role]}
+      if (( last_restart > 0 && (now - last_restart) < current_backoff )); then
+        all_exited=false
+        continue
+      fi
+
+      respawn_role "$wd_role"
+
+      if (( current_backoff < 60 ));  then ROLE_BACKOFF[$wd_role]=60
+      elif (( current_backoff < 120 )); then ROLE_BACKOFF[$wd_role]=120
+      elif (( current_backoff < 300 )); then ROLE_BACKOFF[$wd_role]=300
+      fi
+
+      ROLE_STABLE_SINCE[$wd_role]=$now
+      tg_send "$(printf '⚠️ *%s* relancé (window gone)' "$wd_role")"
+      all_exited=false
+      continue
+    fi
+
+    all_exited=false
+
+    # — Pane dead (window still exists) —
+    if check_pane_dead "$wd_role"; then
+      exit_code=$(get_pane_exit_code "$wd_role")
+
+      # Exit 42 = context-pressure checkpoint → immediate resume
+      if [[ "$exit_code" == "42" ]]; then
+        log "INFO" "${wd_role} exited 42 (context pressure) — immediate resume"
+        respawn_role "$wd_role"
+        ROLE_STABLE_SINCE[$wd_role]=$now
+        continue
+      fi
+
+      # Exit 0 = graceful
+      [[ "$exit_code" == "0" ]] && continue
+
+      # Other codes = crash
+      log "WARN" "${wd_role} pane dead (exit ${exit_code:-?})"
+      current_backoff=${ROLE_BACKOFF[$wd_role]}
+      last_restart=${ROLE_LAST_RESTART[$wd_role]}
+      if (( last_restart > 0 && (now - last_restart) < current_backoff )); then
+        continue
+      fi
+
+      respawn_role "$wd_role"
+
+      if (( current_backoff < 60 ));  then ROLE_BACKOFF[$wd_role]=60
+      elif (( current_backoff < 120 )); then ROLE_BACKOFF[$wd_role]=120
+      elif (( current_backoff < 300 )); then ROLE_BACKOFF[$wd_role]=300
+      fi
+
+      ROLE_STABLE_SINCE[$wd_role]=$now
+      tg_send "$(printf '⚠️ *%s* relancé (exit %s)' "$wd_role" "${exit_code:-?}")"
+      continue
+    fi
+
+    # — Alive: check heartbeat (skip during initial grace period) —
+    if (( now > HB_GRACE_UNTIL )); then
+      if ! check_heartbeat_fresh "$wd_role"; then
+        current_backoff=${ROLE_BACKOFF[$wd_role]}
+        last_restart=${ROLE_LAST_RESTART[$wd_role]}
+        if (( last_restart > 0 && (now - last_restart) < current_backoff )); then
+          continue
+        fi
+
+        log "WARN" "${wd_role} heartbeat stale (>120s)"
+        respawn_role "$wd_role"
+
+        if (( current_backoff < 60 ));  then ROLE_BACKOFF[$wd_role]=60
+        elif (( current_backoff < 120 )); then ROLE_BACKOFF[$wd_role]=120
+        elif (( current_backoff < 300 )); then ROLE_BACKOFF[$wd_role]=300
+        fi
+
+        ROLE_STABLE_SINCE[$wd_role]=$now
+        tg_send "$(printf '⚠️ *%s* heartbeat stale — relancé' "$wd_role")"
+        continue
+      fi
+    fi
+
+    # — Stable: reset backoff after 5 min —
+    stable_since=${ROLE_STABLE_SINCE[$wd_role]}
+    if (( now - stable_since > 300 && ROLE_BACKOFF[$wd_role] > 30 )); then
+      ROLE_BACKOFF[$wd_role]=30
+      ROLE_LAST_RESTART[$wd_role]=0
+      log "INFO" "${wd_role} stable 5+ min — backoff reset"
+    fi
+  done
+
+  # ── All orchestrators exited gracefully → pipeline complete ─────────────
+  if [[ "$all_exited" == "true" ]] && [[ "$BOOTSTRAP_DONE" == "true" ]]; then
+    log "INFO" "All orchestrators have exited — pipeline complete"
+
+    tmux kill-window -t "${TMUX_SESSION}:mcp" 2>/dev/null || true
+    tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    rm -f "${PROJECT_DIR}/.pipeline/locks/"* 2>/dev/null || true
+
+    tg_send "Pipeline terminé"
+
+    echo ""
+    echo "════════════════════════════════════════════════════"
+    echo "  Pipeline terminé"
+    echo "════════════════════════════════════════════════════"
+    echo ""
+    exit 0
   fi
 done
