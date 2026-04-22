@@ -192,6 +192,13 @@ def main(argv: list[str] | None = None) -> int:
         stderr=subprocess.PIPE,
     )
 
+    # Write initial heartbeat IMMEDIATELY so the watchdog doesn't kill us
+    # during claude's first-turn processing (which can take 30-60s).
+    write_heartbeat(args.heartbeat_file)
+
+    # Brief pause to let claude subprocess connect to MCP before we send stdin
+    time.sleep(2)
+
     # -- Shutdown handling --
     shutting_down = False
 
@@ -294,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
         # Send periodic continue messages
         now = time.time()
         if (now - last_continue) >= args.cycle_seconds and not shutting_down:
+            write_heartbeat(args.heartbeat_file)
+
             if proc.poll() is not None:
                 break
 
@@ -305,7 +314,6 @@ def main(argv: list[str] | None = None) -> int:
                 log("broken pipe on continue message - claude likely exited")
                 break
 
-            write_heartbeat(args.heartbeat_file)
             rotate_log(args.log_file)
             last_continue = now
 

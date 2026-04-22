@@ -577,7 +577,8 @@ setup_safeguards() {
       "Agent(ui-quality-reviewer)",
       "Agent(code-quality-reviewer)",
       "Agent(docs-auditor)",
-      "Agent(scratch-tester)"
+      "Agent(scratch-tester)",
+      "mcp__pipeline-coordinator__*"
     ]
   },
   "hooks": {
@@ -980,14 +981,14 @@ launch_claude_window() {
 set -uo pipefail
 rm -f '${cmd_file}'
 cd '${PROJECT_DIR}'
-PROMPT=\$(<'${prompt_file}')
-exec claude -p "\$PROMPT" \\
+exec claude -p \\
   --session-id '${session_uuid}' \\
   --name '${role}' \\
   --model '${CLAUDE_MODEL}' --effort '${CLAUDE_EFFORT}' \\
   --mcp-config '${PROJECT_DIR}/.pipeline/mcp.json' \\
   --output-format stream-json --verbose \\
-  --permission-mode default
+  --permission-mode default \\
+  < '${prompt_file}'
 LAUNCHER_EOF
 
     tmux new-window -t "${TMUX_SESSION}" -n "${role}" "${cmd_file}"
