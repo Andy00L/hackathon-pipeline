@@ -9,3 +9,12 @@ logs/
 *~
 .vscode/
 .idea/
+.pipeline/inbox/
+.pipeline/checkpoint/
+.pipeline/dead-letter/
+.pipeline/locks/
+.pipeline/verdicts.jsonl
+.pipeline/state.json
+.pipeline/mcp.json
+notes/PACKAGES.md
+notes/BRIEF-DISTILLED.md
