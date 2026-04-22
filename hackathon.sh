@@ -742,6 +742,7 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') | PIPELINE_START | $HACKATHON_NAME" >> "$EVEN
 
 if [[ "$DRY_RUN" != "1" ]]; then
 # ── Lock file ───────────────────────────────────────────────────────────────
+mkdir -p "$PROJECT_DIR"
 LOCK_FILE="${PROJECT_DIR}/.pipeline.lock"
 if [[ -f "$LOCK_FILE" ]]; then
   lock_pid=$(cat "$LOCK_FILE" 2>/dev/null)
