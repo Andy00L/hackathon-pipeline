@@ -667,7 +667,6 @@ launch_claude_in_tmux() {
 #!/bin/bash
 rm -f "\$0"
 cd "${project_dir}"
-export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 exec ${claude_cmd} <<'PROMPT_EOF'
 CMDEOF
     printf '%s\n' "$prompt"
