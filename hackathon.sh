@@ -505,36 +505,23 @@ CONF
 setup_safeguards() {
   local settings_file="${PROJECT_DIR}/.claude/settings.json"
   local hook_dir="${PROJECT_DIR}/.claude/hooks"
-  local hook_script="${hook_dir}/pretooluse-safeguard.sh"
+  local templates_dir="${PROJECT_DIR}/templates/hooks"
   mkdir -p "$hook_dir"
 
-  # Create the hook script (always valid JSON output, always exit 0)
-  cat > "$hook_script" << 'HOOK_EOF'
-#!/bin/bash
-INPUT=$(cat)
-CMD=$(echo "$INPUT" | grep -oP '"command"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"command"\s*:\s*"//;s/"$//' 2>/dev/null || echo "")
+  # Copy hook scripts from templates, chmod +x
+  local hook_files=("pretooluse-safeguard.sh" "precompact-checkpoint.sh" "posttooluse-fanout.sh")
+  for hf in "${hook_files[@]}"; do
+    if [[ -f "${templates_dir}/${hf}" ]]; then
+      cp "${templates_dir}/${hf}" "${hook_dir}/${hf}"
+      chmod +x "${hook_dir}/${hf}"
+    else
+      log "WARN" "Template hook not found: ${templates_dir}/${hf}"
+    fi
+  done
 
-if [[ -z "$CMD" ]]; then
-  echo '{"result":"allow"}'
-  exit 0
-fi
-
-# Patterns dangereux
-if echo "$CMD" | grep -qiE '(rm\s+-rf\s+[/~]|git\s+push\s+--force|git\s+reset\s+--hard|chmod\s+777|>\s*/dev/sd|mkfs\.|dd\s+if=)'; then
-  echo '{"result":"deny","reason":"Commande bloquée par safeguard"}'
-  exit 0
-fi
-
-# Accès Windows filesystem
-if echo "$CMD" | grep -qE '/mnt/[a-z]/'; then
-  echo '{"result":"deny","reason":"Accès Windows filesystem bloqué"}'
-  exit 0
-fi
-
-echo '{"result":"allow"}'
-exit 0
-HOOK_EOF
-  chmod +x "$hook_script"
+  local pretooluse_hook="${hook_dir}/pretooluse-safeguard.sh"
+  local precompact_hook="${hook_dir}/precompact-checkpoint.sh"
+  local posttooluse_hook="${hook_dir}/posttooluse-fanout.sh"
 
   local safeguards
   safeguards=$(cat <<SAFEGUARDS_EOF
@@ -570,7 +557,24 @@ HOOK_EOF
       "Grep",
       "WebFetch",
       "WebSearch",
-      "Agent"
+      "Agent",
+      "Agent(architecte)",
+      "Agent(implementeur)",
+      "Agent(securite)",
+      "Agent(qualite)",
+      "Agent(uiux-designer)",
+      "Agent(docs-reader)",
+      "Agent(package-research)",
+      "Agent(readme-specialist)",
+      "Agent(injection-specialist)",
+      "Agent(secrets-config-specialist)",
+      "Agent(auth-crypto-specialist)",
+      "Agent(deps-auditor)",
+      "Agent(threat-modeler)",
+      "Agent(ui-quality-reviewer)",
+      "Agent(code-quality-reviewer)",
+      "Agent(docs-auditor)",
+      "Agent(scratch-tester)"
     ]
   },
   "hooks": {
@@ -580,14 +584,32 @@ HOOK_EOF
         "hooks": [
           {
             "type": "command",
-            "command": "${hook_script}"
+            "command": "${pretooluse_hook}"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${precompact_hook}"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${posttooluse_hook}"
           }
         ]
       }
     ]
-  },
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   }
 }
 SAFEGUARDS_EOF
@@ -599,15 +621,26 @@ SAFEGUARDS_EOF
       .permissions.defaultMode = $sg.permissions.defaultMode |
       .permissions.deny = ((.permissions.deny // []) + $sg.permissions.deny | unique) |
       .permissions.allow = ((.permissions.allow // []) + $sg.permissions.allow | unique) |
-      .hooks.PreToolUse = $sg.hooks.PreToolUse |
-      .env = ((.env // {}) + $sg.env)
+      .hooks.PreToolUse = (
+        [(.hooks.PreToolUse // [])[], ($sg.hooks.PreToolUse // [])[]]
+        | unique_by(.matcher // "")
+      ) |
+      .hooks.PreCompact = (
+        [(.hooks.PreCompact // [])[], ($sg.hooks.PreCompact // [])[]]
+        | unique_by(.hooks[0].command // "")
+      ) |
+      .hooks.PostToolUse = (
+        [(.hooks.PostToolUse // [])[], ($sg.hooks.PostToolUse // [])[]]
+        | unique_by(.matcher // "")
+      ) |
+      del(.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
     ' "$settings_file")
     echo "$merged" > "$settings_file"
   else
     echo "$safeguards" > "$settings_file"
   fi
 
-  log "INFO" "Safeguards GitHub configurés"
+  log "INFO" "Safeguards configures (3 hooks: PreToolUse, PreCompact, PostToolUse)"
 }
 
 # ── Lancer Claude dans tmux (sans race condition) ───────────────────────────
