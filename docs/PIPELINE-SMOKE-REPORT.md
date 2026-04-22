@@ -167,3 +167,58 @@ Skipped: api.telegram.org URLs (runtime-only), templated `github.com/${...}` URL
 **READY**
 
 All 8 steps of the redesign are complete and verified. 24/24 unit tests pass, 4/4 hook behavioral tests pass, 3/3 MCP integration round-trips succeed, 3/3 lock contention tests pass, and the 6-window launcher produces the correct commands in DRY_RUN mode. The single 404 URL (cli.github.com/packages index page) is cosmetic -- the APT source line it appears in still functions correctly for package installation. No functional blockers remain.
+
+---
+
+## Streaming input wrapper verification
+
+Added `mcp-coord/orchestrator_wrapper.py` -- a Python wrapper that spawns
+`claude --print --input-format stream-json` as a persistent subprocess and
+feeds it periodic "continue your loop" user messages every 60 seconds.
+
+### Wrapper --help (dry-check)
+
+```
+$ python3 mcp-coord/orchestrator_wrapper.py --help
+usage: orchestrator_wrapper.py [-h] --role
+                               {supervisor,delivery,security,quality}
+                               --session-id SESSION_ID --prompt-file
+                               PROMPT_FILE --mcp-config MCP_CONFIG --log-file
+                               LOG_FILE --heartbeat-file HEARTBEAT_FILE
+                               [--model MODEL]
+                               [--effort {low,medium,high,xhigh,max}]
+                               [--cycle-seconds CYCLE_SECONDS]
+```
+
+Exit 0. All arguments parse correctly.
+
+### DRY_RUN verification
+
+```
+$ DRY_RUN=1 ./hackathon.sh 2>&1 | grep -c orchestrator_wrapper
+4
+```
+
+4 windows (supervisor, delivery, security, quality) use the wrapper.
+Bootstrap still uses plain `claude -p` (one-shot, as intended).
+
+### Stream-json input format (verified from docs)
+
+Source: `code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode`
+
+User messages sent via stdin use this JSON shape (one object per line):
+
+```json
+{"type": "user", "message": {"role": "user", "content": "message text"}}
+```
+
+The streaming input mode creates a persistent, interactive session --
+the process stays alive between messages, enabling multi-turn conversations
+without restarting claude.
+
+### Session resumption
+
+`--session-id <uuid>` assigns a UUID to a new conversation.
+`--resume <uuid>` loads an existing conversation by session ID.
+The wrapper uses `--session-id` on first launch (log file empty/missing)
+and `--resume` on subsequent launches (log file has content from prior run).

@@ -943,10 +943,10 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo ""
   echo "WINDOW 0 (mcp):       ${MCP_PY} ${SCRIPT_DIR}/mcp-coord/server.py"
   echo "WINDOW 1 (bootstrap): claude -p <bootstrap.prompt.md> --session-id $(role_session_id bootstrap) --name bootstrap --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
-  echo "WINDOW 2 (supervisor): claude -p <supervisor.prompt.md> --session-id $(role_session_id supervisor) --name supervisor --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
-  echo "WINDOW 3 (delivery):  claude -p <delivery.prompt.md> --session-id $(role_session_id delivery) --name delivery --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
-  echo "WINDOW 4 (security):  claude -p <security.prompt.md> --session-id $(role_session_id security) --name security --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
-  echo "WINDOW 5 (quality):   claude -p <quality.prompt.md> --session-id $(role_session_id quality) --name quality --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --output-format stream-json --verbose --permission-mode default"
+  echo "WINDOW 2 (supervisor): ${MCP_PY} ${SCRIPT_DIR}/mcp-coord/orchestrator_wrapper.py --role supervisor --session-id $(role_session_id supervisor) --prompt-file ${SCRIPT_DIR}/.claude/orchestrators/supervisor.prompt.md --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --log-file ${PROJECT_DIR}/.pipeline/logs/supervisor.jsonl --heartbeat-file ${PROJECT_DIR}/.pipeline/heartbeat/supervisor.txt --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --cycle-seconds 60"
+  echo "WINDOW 3 (delivery):  ${MCP_PY} ${SCRIPT_DIR}/mcp-coord/orchestrator_wrapper.py --role delivery --session-id $(role_session_id delivery) --prompt-file ${SCRIPT_DIR}/.claude/orchestrators/delivery.prompt.md --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --log-file ${PROJECT_DIR}/.pipeline/logs/delivery.jsonl --heartbeat-file ${PROJECT_DIR}/.pipeline/heartbeat/delivery.txt --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --cycle-seconds 60"
+  echo "WINDOW 4 (security):  ${MCP_PY} ${SCRIPT_DIR}/mcp-coord/orchestrator_wrapper.py --role security --session-id $(role_session_id security) --prompt-file ${SCRIPT_DIR}/.claude/orchestrators/security.prompt.md --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --log-file ${PROJECT_DIR}/.pipeline/logs/security.jsonl --heartbeat-file ${PROJECT_DIR}/.pipeline/heartbeat/security.txt --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --cycle-seconds 60"
+  echo "WINDOW 5 (quality):   ${MCP_PY} ${SCRIPT_DIR}/mcp-coord/orchestrator_wrapper.py --role quality --session-id $(role_session_id quality) --prompt-file ${SCRIPT_DIR}/.claude/orchestrators/quality.prompt.md --mcp-config ${PROJECT_DIR}/.pipeline/mcp.json --log-file ${PROJECT_DIR}/.pipeline/logs/quality.jsonl --heartbeat-file ${PROJECT_DIR}/.pipeline/heartbeat/quality.txt --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT} --cycle-seconds 60"
   echo ""
   echo "DRY_RUN complete — exiting without launching tmux."
   exit 0
@@ -956,10 +956,10 @@ fi
 tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
 # ── Helper: launch a claude orchestrator as a tmux window ─────────────────────
-# Creates a temp launcher script that reads the prompt file at runtime and
-# passes its content to claude -p. Variable expansion in bash does not
-# recursively interpret shell metacharacters, so backticks and $ signs
-# inside the prompt markdown are safe inside "$PROMPT".
+# Bootstrap: one-shot `claude -p` (exits after producing research artefacts).
+# Long-running roles (supervisor, delivery, security, quality): persistent
+# Python wrapper that feeds `claude --input-format stream-json` with periodic
+# continue messages.
 # Usage: launch_claude_window <role> <prompt_file>
 launch_claude_window() {
   local role="$1"
@@ -969,11 +969,13 @@ launch_claude_window() {
   local session_uuid
   session_uuid=$(role_session_id "$role")
 
-  local cmd_file
-  cmd_file=$(mktemp "/tmp/hackathon-${role}-XXXXXX.sh")
-  chmod +x "$cmd_file"
+  # Bootstrap stays one-shot (plain -p)
+  if [[ "$role" == "bootstrap" ]]; then
+    local cmd_file
+    cmd_file=$(mktemp "/tmp/hackathon-${role}-XXXXXX.sh")
+    chmod +x "$cmd_file"
 
-  cat > "$cmd_file" <<LAUNCHER_EOF
+    cat > "$cmd_file" <<LAUNCHER_EOF
 #!/bin/bash
 set -uo pipefail
 rm -f '${cmd_file}'
@@ -988,8 +990,25 @@ exec claude -p "\$PROMPT" \\
   --permission-mode default
 LAUNCHER_EOF
 
-  tmux new-window -t "${TMUX_SESSION}" -n "${role}" "${cmd_file}"
-  tmux pipe-pane -t "${TMUX_SESSION}:${role}" -o "tee -a '${log_file}'"
+    tmux new-window -t "${TMUX_SESSION}" -n "${role}" "${cmd_file}"
+    tmux pipe-pane -t "${TMUX_SESSION}:${role}" -o "tee -a '${log_file}'"
+    log "INFO" "Launched window '${role}'"
+    return
+  fi
+
+  # Long-running orchestrators: use the streaming-input wrapper
+  tmux new-window -t "${TMUX_SESSION}" -n "${role}" \
+    "cd '${PROJECT_DIR}' && exec '${MCP_PY}' \
+       '${SCRIPT_DIR}/mcp-coord/orchestrator_wrapper.py' \
+       --role '${role}' \
+       --session-id '${session_uuid}' \
+       --prompt-file '${prompt_file}' \
+       --mcp-config '${PROJECT_DIR}/.pipeline/mcp.json' \
+       --log-file '${log_file}' \
+       --heartbeat-file '${PROJECT_DIR}/.pipeline/heartbeat/${role}.txt' \
+       --model '${CLAUDE_MODEL}' \
+       --effort '${CLAUDE_EFFORT}' \
+       --cycle-seconds 60"
   log "INFO" "Launched window '${role}'"
 }
 
@@ -1101,22 +1120,37 @@ respawn_mcp() {
 
 respawn_role() {
   local role="$1"
+
+  # Bootstrap is one-shot; never respawn it
+  if [[ "$role" == "bootstrap" ]]; then
+    return
+  fi
+
   local log_file="${PROJECT_DIR}/.pipeline/logs/${role}.jsonl"
   local session_uuid
   session_uuid=$(role_session_id "$role")
-  local cmd="cd '${PROJECT_DIR}' && exec claude --resume '${session_uuid}' --name '${role}' \
-    -p 'Session resumed after interruption. Continue your orchestrator role.' \
-    --model '${CLAUDE_MODEL}' --effort '${CLAUDE_EFFORT}' \
+
+  # Respawn via the streaming-input wrapper. The wrapper detects the
+  # existing log file and uses --resume instead of --session-id, so the
+  # claude subprocess resumes the prior conversation.
+  local cmd="cd '${PROJECT_DIR}' && exec '${MCP_PY}' \
+    '${SCRIPT_DIR}/mcp-coord/orchestrator_wrapper.py' \
+    --role '${role}' \
+    --session-id '${session_uuid}' \
+    --prompt-file '${SCRIPT_DIR}/.claude/orchestrators/${role}.prompt.md' \
     --mcp-config '${PROJECT_DIR}/.pipeline/mcp.json' \
-    --output-format stream-json --verbose --permission-mode default"
+    --log-file '${log_file}' \
+    --heartbeat-file '${PROJECT_DIR}/.pipeline/heartbeat/${role}.txt' \
+    --model '${CLAUDE_MODEL}' \
+    --effort '${CLAUDE_EFFORT}' \
+    --cycle-seconds 60"
 
   if check_window_alive "$role"; then
     tmux respawn-window -k -t "${TMUX_SESSION}:${role}" "$cmd"
   else
     tmux new-window -t "${TMUX_SESSION}" -n "${role}" "$cmd"
   fi
-  tmux pipe-pane -t "${TMUX_SESSION}:${role}" -o "tee -a '${log_file}'"
-  log "INFO" "Respawned ${role} via --resume"
+  log "INFO" "Respawned ${role} via wrapper (--resume)"
 }
 
 # ── Graceful shutdown handler (SIGINT / SIGTERM) ──────────────────────────────
