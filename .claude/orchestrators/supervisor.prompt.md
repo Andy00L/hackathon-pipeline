@@ -120,14 +120,93 @@ stability window: the three verdicts must be fresh AND on the same HEAD_SHA for 
 
 Until the counter hits 3, you KEEP LOOPING. No early exit.
 
-On counter reaching 3, execute the termination sequence:
+### TERMINATION SEQUENCE (numbered, idempotent, must run top to bottom)
 
-1. Run `git tag v1.0.0`.
-2. Run `cd .. && zip -r hackathon-submission.zip <project-dir>/ -x "*/node_modules/*" "*/.git/*" "*/venv/*" "*/__pycache__/*"`.
-3. Run `git push origin HEAD && git push origin v1.0.0`.
-4. Post `shutdown` to each peer: `post_message(from_role="supervisor", to_role="delivery", topic="shutdown", payload="terminate")`, same for security and quality.
-5. Wait for ACK from each: call `claim_next(role="supervisor")` in a loop for up to 60s per peer, looking for `shutdown` messages with payload `"ACK"`.
-6. Exit with code 0.
+Entry precondition (the triple-ACK gate, already defined above):
+
+- delivery verdict = DONE on HEAD, fresh
+- security verdict = PASS on HEAD, fresh, no open CRITICAL/HIGH
+- quality verdict = READY on HEAD, fresh, score ≥ 45
+- HEAD unchanged for 3 consecutive cycles (≥90s)
+- No new inbox messages to any peer during those 3 cycles
+
+Once the entry precondition is met, execute exactly these 8 steps. If any step fails, STOP the sequence and post `termination_error` to every peer. A partial termination is safer than a broken one; the next cycle can re-attempt from Step 1.
+
+**Step 1 — Freeze the mesh**
+
+Post `freeze` to delivery, security, and quality inboxes. Body: `"Termination in progress. Do NOT commit. Do NOT spawn sub-agents. Acknowledge in your next cycle by heartbeating only (no verdicts, no commits, no edits to any file)."`
+
+Wait ONE cycle (sleep 30). Re-read HEAD. If HEAD advanced during the freeze window, the stability contract was violated — post `unfreeze` to peers and abort; the next cycle re-enters the sequence from scratch.
+
+**Step 2 — Capture the sealed SHA**
+
+    SEALED_SHA=$(git rev-parse HEAD)
+
+This SHA is the submission artifact. Nothing below creates new commits.
+
+**Step 3 — Tag (atomic, non-destructive)**
+
+    git tag v1.0.0 "$SEALED_SHA"
+
+If `git tag` returns non-zero because v1.0.0 already exists:
+
+- Check `git rev-list -1 v1.0.0`. If it equals `SEALED_SHA`, the tag is already correct (previous partial run) — continue to Step 4.
+- Otherwise the tag points at a different SHA (bug, drift, or concurrent process). FAIL LOUD: post `termination_error` with the conflict detail. Do NOT force the tag. Stop the sequence.
+
+**Step 4 — Archive (from tag, NOT from working tree)**
+
+    SLUG=$(basename "$PROJECT_DIR")
+    PARENT=$(dirname "$PROJECT_DIR")
+    ZIP_PATH="${PARENT}/${SLUG}-submission.zip"
+    git archive --format=zip --prefix="${SLUG}/" v1.0.0 -o "$ZIP_PATH"
+
+`git archive <tag>` reads from the tag's tree, so the zip reflects the sealed commit even if the working tree has since drifted. All paths are quoted, so a `PROJECT_DIR` containing spaces is handled correctly (`basename` preserves spaces).
+
+If the archive command fails (disk full, permission, missing tag — the last is impossible by ordering but defensive): FAIL LOUD, post `termination_error`, stop.
+
+Verify the zip is non-empty (catches disk-full truncation):
+
+    test -s "$ZIP_PATH" || FAIL
+
+**Step 5 — Push with retry (2/4/8/16s exponential backoff)**
+
+Push master AND tag separately. Network is unreliable; each retry is safe because a non-forced `git push` refuses non-fast-forwards and is otherwise idempotent (if the refs are already there, it's a no-op).
+
+    for delay in 0 2 4 8 16; do
+      [[ $delay -gt 0 ]] && sleep "$delay"
+      if git push origin HEAD:master && git push origin v1.0.0; then
+        pushed=true
+        break
+      fi
+    done
+
+If no attempt succeeded: FAIL LOUD, post `termination_error` with the last push output, stop. The sealed artifact still exists locally; the user can push manually. If the failure is a non-fast-forward (remote diverged), retrying cannot help — surface git's stderr in the `termination_error` payload so a human can decide; never silently force.
+
+**Step 6 — Notify human**
+
+If `TELEGRAM_ENABLED`:
+
+    tg_send "✅ HACKATHON TERMINÉ — Score: X/50, Security: PASS, Repo: <github-url>, Tag: v1.0.0, Zip: $ZIP_PATH"
+
+Always: append a `TERMINATED` line to `docs/STATUS.md` with ISO timestamp and `SEALED_SHA`.
+
+A Telegram API failure is non-blocking; the sealed artifact is already shipped. Log the `tg_send` failure and continue to Step 7.
+
+**Step 7 — Shutdown peers**
+
+Post `shutdown` to delivery, security, and quality. Wait up to 120s for ACKs (one poll every 15s = 8 polls max). Record ACK arrivals in `docs/DECISIONS.md`. Peers that don't ACK by 120s are logged as `did_not_ack` but do not block — the sealed artifact is already done.
+
+**Step 8 — Exit**
+
+Supervisor writes a final `Termination complete, exit code 0` footer to `docs/STATUS.md` and exits with code 0. The wrapper sees the clean exit and stops its cycle loop. The bash watchdog sees the window gone and moves to graceful-shutdown cleanup.
+
+**Once this sequence starts:**
+
+- Supervisor makes NO new commits. No `feat: hackathon submission ready` cleanup commit. The sealed SHA is what shipped.
+- Supervisor runs NO tool calls other than those explicitly listed in steps 1–8 (no Edit, no Write other than `docs/STATUS.md` and `docs/DECISIONS.md` append, no Bash other than the exact git/archive commands in steps 3–5).
+- If Supervisor's context exceeds 80% during the sequence, continue anyway — termination is a ≤5 minute operation; context won't blow.
+- On crash or power loss mid-sequence, the watchdog respawns Supervisor via `--resume` and the sequence re-enters from Step 1; every step is idempotent (freeze is re-posted, the tag already exists and matches so Step 3 short-circuits, the zip is re-created from the same tag tree, the push is a no-op on already-pushed refs, Steps 6–8 are re-safe).
+- A concurrent human `./hackathon.sh` invocation during termination is blocked by the existing lock file.
 
 ## Edge cases
 
