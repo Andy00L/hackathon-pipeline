@@ -111,6 +111,7 @@ build/
 .next/
 target/
 *.log
+.pipeline/
 .pipeline.log
 .pipeline-live.log
 .pipeline.lock

@@ -762,6 +762,41 @@ echo "  Pipeline hackathon : ${HACKATHON_NAME}"
 echo "════════════════════════════════════════════════════"
 echo ""
 
+# ── Garde : projet déjà scellé (tag v1.0.0) ────────────────────────────────
+# Empêche un relaunch accidentel d'ajouter des commits par-dessus l'artefact
+# de soumission scellé. Skip pour les modes lecture seule / reprise.
+if [[ "${WATCH_MODE:-false}" != "true" \
+   && "${ATTACH_MODE:-false}" != "true" \
+   && "${RESUME_SUBMIT_MODE:-false}" != "true" ]]; then
+  if [[ -d "${PROJECT_DIR}/.git" ]] \
+     && [[ -n "$(git -C "$PROJECT_DIR" tag -l v1.0.0 2>/dev/null)" ]]; then
+    sealed_sha=$(git -C "$PROJECT_DIR" rev-list -n 1 v1.0.0 2>/dev/null || echo "?")
+    printf '\033[31m\n'
+    printf '════════════════════════════════════════════════════════════════\n'
+    printf '  ⚠  PROJET DÉJÀ SCELLÉ (tag v1.0.0)\n'
+    printf '════════════════════════════════════════════════════════════════\n'
+    printf '\n'
+    printf '  Dossier : %s\n' "$PROJECT_DIR"
+    printf '  Tag v1.0.0 → %s\n' "$sealed_sha"
+    printf '\n'
+    printf '  Relancer le pipeline va ajouter de nouveaux commits par-dessus\n'
+    printf '  cet artefact de soumission, ce qui peut le corrompre.\n'
+    printf '\033[0m\n'
+    printf 'Relaunch anyway? This will add commits on top of v1.0.0 (o/N): '
+    read -r _seal_reply </dev/tty || _seal_reply=""
+    case "$_seal_reply" in
+      o|O|oui|OUI|Oui|y|Y|yes|YES|Yes)
+        log "WARN" "Relaunch confirmé sur projet scellé v1.0.0 (${sealed_sha}) — nouveaux commits seront ajoutés par-dessus le tag"
+        ;;
+      *)
+        echo "Abandon. Le projet reste scellé à v1.0.0."
+        exit 0
+        ;;
+    esac
+    unset _seal_reply sealed_sha
+  fi
+fi
+
 # ── Initialiser le projet ────────────────────────────────────────────────────
 git_init
 ensure_github
