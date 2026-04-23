@@ -526,6 +526,20 @@ setup_safeguards() {
   local precompact_hook="${hook_dir}/precompact-checkpoint.sh"
   local posttooluse_hook="${hook_dir}/posttooluse-fanout.sh"
 
+  # Baseline permissions.allow — rationale for the non-obvious entries:
+  #   - "mcp__pipeline-coordinator__*" : 8 coordinator tools (post_message,
+  #     claim_next, record_verdict, request_gate, get_latest_diff,
+  #     acquire_file_lock, release_file_lock, heartbeat). Server-side,
+  #     none touch git / shell / FS outside .pipeline/. Without this
+  #     wildcard, a fresh settings.json denies every orchestrator MCP call
+  #     (observed in a live run — patched by hand with jq).
+  #   - "Agent" + "Agent(*)" + explicit Agent(name) entries : orchestrators
+  #     spawn sub-agents; the wildcard covers any future sub-agent name
+  #     without enumeration. The enumerated entries remain for
+  #     /permissions visibility. Sub-agents are defined in this repo —
+  #     the model can't inject new names.
+  # The jq merge below uses `unique`, so re-running setup_safeguards on a
+  # pre-existing settings.json is a dedup no-op.
   local safeguards
   safeguards=$(cat <<SAFEGUARDS_EOF
 {
@@ -561,6 +575,7 @@ setup_safeguards() {
       "WebFetch",
       "WebSearch",
       "Agent",
+      "Agent(*)",
       "Agent(architecte)",
       "Agent(implementeur)",
       "Agent(securite)",
