@@ -696,6 +696,27 @@ CMDEOF
 source "${SCRIPT_DIR}/lib/utils.sh"
 source "${SCRIPT_DIR}/lib/telegram.sh"
 
+# Copies the UI primitives starter kit into the project. cp -rn (no-clobber)
+# preserves per-project edits across re-runs: the starter kit is scaffolding,
+# not a lock-step library.
+inject_ui_primitives() {
+  local pipeline_dir="$1"
+  local src="${pipeline_dir}/templates/ui-primitives"
+  local dst="${PROJECT_DIR}/ui-primitives"
+
+  if [[ ! -d "$src" ]]; then
+    log "WARN" "ui-primitives template missing at ${src}; skipping"
+    return 0
+  fi
+
+  mkdir -p "$dst"
+  cp -rn "${src}/." "${dst}/" 2>/dev/null || true
+
+  local count
+  count=$(find "$dst/primitives" -name "*.tsx" 2>/dev/null | wc -l)
+  log "INFO" "UI primitives starter kit present at ${dst} (${count} .tsx files)"
+}
+
 # Deterministic UUIDv5 per role so --session-id is stable across runs
 # and --resume reliably finds the right session.
 role_session_id() {
@@ -778,6 +799,7 @@ setup_safeguards
 
 # Générer CLAUDE.md
 inject_claude_md "$SCRIPT_DIR"
+inject_ui_primitives "$SCRIPT_DIR"
 
 # Premier commit
 git_checkpoint "setup initial : CLAUDE.md + agents"
