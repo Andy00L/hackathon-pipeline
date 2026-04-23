@@ -47,7 +47,12 @@
       "Bash(/home/drew/pipeline_hack/mcp-coord/.venv/bin/python3 -m pytest mcp-coord/tests/test_integration.py -q)",
       "Bash(/home/drew/pipeline_hack/mcp-coord/.venv/bin/python3 -m pytest mcp-coord/tests/test_server.py -q -k \"lock\")",
       "Bash(DRY_RUN=1 bash:*)",
-      "Bash(/home/drew/pipeline_hack/mcp-coord/.venv/bin/python3 -m pytest mcp-coord/tests -q)"
+      "Bash(/home/drew/pipeline_hack/mcp-coord/.venv/bin/python3 -m pytest mcp-coord/tests -q)",
+      "Bash(DRY_RUN=1 ./hackathon.sh)",
+      "Bash([[ -f \"$PROJECT_SETTINGS\" ]])",
+      "Bash(jq '.permissions.allow = \\(\\(.permissions.allow // []\\) + [\"mcp__pipeline-coordinator__*\"] | unique\\)' /home/drew/hackathons/drawbridge/.claude/settings.json)",
+      "Bash(mv /home/drew/hackathons/drawbridge/.claude/settings.json.tmp /home/drew/hackathons/drawbridge/.claude/settings.json)",
+      "WebFetch(domain:ui.shadcn.com)"
     ]
   }
 }
