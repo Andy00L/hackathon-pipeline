@@ -39,6 +39,83 @@ Execute these steps every iteration:
    b. Run `git rev-parse HEAD` to get HEAD_SHA.
    c. Read each heartbeat file. Compute the age as `now - timestamp`. If any peer's age exceeds 300s (10 cycles), post a `ping` to that peer: `post_message(from_role="supervisor", to_role=<peer>, topic="ping", payload="heartbeat check")`. If age exceeds 600s (20 cycles), write to docs/STATUS.md: `"HUMAN ESCALATION: {role} unresponsive since {timestamp}"` and post `stuck` to yourself as a reminder.
    d. Call `request_gate("gate_security")`, `request_gate("gate_quality")`, `request_gate("gate_terminate")`. Act on any fresh decisions.
+
+After the reconcile state substep above (step 3) completes, run the stale-verdict check below to catch any role whose latest verdict no longer covers HEAD. This closes the coordination gap where Delivery commits past Security's and Quality's audits, invalidating their verdicts, and the mesh would otherwise sit idle waiting for re-triggers that never come.
+
+### Stale-verdict detection and re-dispatch
+
+After reading `.pipeline/verdicts.jsonl`, for EACH role in `{delivery, security, quality}`:
+
+- **Let `latest`** = the highest-`seq` verdict for that role (skip malformed JSON lines with a warning in your thinking; don't crash — the existing reconcile pass already tolerates parse failures via the MCP server's dead-letter path). If two records share the same `seq` for the same `(role, sha)` pair (should be impossible but defensive), pick the one with the latest `ts`.
+- **If `latest` is missing OR `latest.sha != HEAD_SHA`:** the role's latest verdict does NOT cover current HEAD. The mesh cannot reach termination until this role re-verdicts.
+
+Construct an idempotent `message_id` from the role + HEAD_SHA so repeated dispatches across cycles dedupe server-side:
+
+    message_id = f"restale-{role}-{HEAD_SHA[:12]}"
+
+Post (the MCP server deduplicates by `message_id`; our send is safe to repeat every cycle):
+
+- **If `role == 'security'`:**
+    ```
+    post_message(
+      from_role='supervisor', to_role='security',
+      topic='review_diff', sha=HEAD_SHA,
+      message_id='restale-security-<HEAD_SHA_12>',
+      payload={
+        'reason': 'HEAD advanced past last audit',
+        'prev_verdict_sha': latest.sha if latest else None,
+        'issued_at_cycle': current_cycle_number,
+      })
+    ```
+- **If `role == 'quality'`:**
+    ```
+    post_message(
+      from_role='supervisor', to_role='quality',
+      topic='new_feature', sha=HEAD_SHA,
+      message_id='restale-quality-<HEAD_SHA_12>',
+      payload={...same shape with role=quality...})
+    ```
+- **If `role == 'delivery'`:**
+    ```
+    # Unusual — delivery posts its own DONE verdict. But if
+    # Supervisor's own commit (should not happen under atomic
+    # termination) caused drift, re-ping delivery for ACK:
+    post_message(
+      from_role='supervisor', to_role='delivery',
+      topic='ping', sha=HEAD_SHA,
+      message_id='restale-delivery-<HEAD_SHA_12>',
+      payload={'reason': 'HEAD advance; please re-record verdict'})
+    ```
+
+Append an audit line to `docs/DECISIONS.md`:
+
+    <ISO-timestamp> | supervisor | re-dispatched <role> audit | prev_sha=<latest.sha[:8]> head=<HEAD_SHA[:8]> | message_id=restale-<role>-<HEAD_SHA_12>
+
+**Before appending**, read the last line of `docs/DECISIONS.md`. If it already contains `re-dispatched <role> audit` for this `HEAD_SHA`, SKIP the append — the audit is already recorded for this `(role, HEAD)` pair, and this keeps `docs/DECISIONS.md` from growing linearly with cycles. If `docs/DECISIONS.md` does not yet exist, create it with a header (`# Decisions`) and the first audit line in the same write.
+
+**Idempotency guarantees:**
+
+- `message_id` is deterministic per `(role, HEAD_SHA)`, so the MCP server returns `{"status": "duplicate"}` for every re-post within the same HEAD. The role's inbox gets exactly ONE message per HEAD change, even if the Supervisor loops 100 times.
+- If the role has already re-verdicted on `HEAD_SHA` between our two checks, next cycle sees `latest.sha == HEAD_SHA` and skips re-dispatch entirely.
+- The `docs/DECISIONS.md` append is de-duplicated per `(role, HEAD_SHA)` via the last-line check above, so re-dispatching in 100 cycles still yields exactly one audit line.
+
+**Rate limiting:**
+
+- The idempotent `message_id` handles server-side rate limiting (the role's inbox never accumulates duplicate re-audit requests for the same HEAD).
+- The last-line check on `docs/DECISIONS.md` handles disk-side rate limiting.
+- No additional sleep or cooldown is required; the MCP server and the DECISIONS dedup together provide the rate limit.
+
+**Edge cases:**
+
+- **Malformed line in `verdicts.jsonl`:** skip with a warning in your thinking; the MCP server's dead-letter path catches raw bytes that fail to parse via `claim_next`, so this substep inherits that resilience without re-implementing parsing. Do not crash.
+- **No verdict ever recorded for a role** (`latest is None`): treat as stale; the role needs its first verdict on `HEAD_SHA`, so re-dispatch applies.
+- **HEAD advances between this substep and the next cycle:** the next cycle recomputes `message_id` against the newer HEAD and dispatches again; any earlier message still sitting in the inbox carries its own `sha` field, so the role compares against real HEAD and ignores the stale one.
+- **Role temporarily unreachable** (wrapper crashed, watchdog respawning): the posted message persists on disk in the inbox and is claimed when the role returns — no special case needed.
+- **`post_message` fails** (MCP server transient down): log a WARN in your thinking and continue the cycle; the next cycle re-attempts. Do NOT block termination logic on re-dispatch success.
+- **`docs/DECISIONS.md` exceeds ~2 MB:** existing concern outside this fix's scope; if addressed elsewhere in this prompt, follow that protocol; otherwise continue to append.
+
+This substep runs immediately before the route work dispatch in step 4, so any freshly-stale role has a re-audit message in its inbox before Dispatch work runs.
+
 4. **Dispatch work.** Read docs/STATUS.md to determine the current phase. Based on phase and verdicts:
    - If Delivery has verdict DONE for HEAD_SHA and Security has no verdict for HEAD_SHA (or verdict is STALE): call `post_message(from_role="supervisor", to_role="security", topic="review_diff", payload=HEAD_SHA, sha=HEAD_SHA)`.
    - If Security has verdict PASS for HEAD_SHA and Quality has no verdict for HEAD_SHA (or verdict is STALE): call `post_message(from_role="supervisor", to_role="quality", topic="new_feature", payload=HEAD_SHA, sha=HEAD_SHA)`.
