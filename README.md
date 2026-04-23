@@ -1,27 +1,11 @@
 # Hackathon Pipeline
 
-Pipeline autonome qui transforme un brief de hackathon en soumission complète. 5 agents Opus specialises debattent, challengent, et iterent jusqu'au consensus.
+A bash launcher plus a Python MCP coordinator that drive four Claude Code orchestrators and a pool of specialist sub-agents. You drop a hackathon brief in `inputs/`, the pipeline sets up the environment, and the orchestrators iterate through implementation, security, and quality gates until a triple-ACK termination condition is reached.
 
 ![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)
-![Claude Code](https://img.shields.io/badge/Claude_Code-v2.1.104-blue?style=flat-square&logo=gnubash&logoColor=white)
-![Opus](https://img.shields.io/badge/Opus_4.6-1M_context-purple?style=flat-square)
+![Bash](https://img.shields.io/badge/Bash-1537_lines-blue?style=flat-square&logo=gnubash&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.12-yellow?style=flat-square&logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/WSL2-Ubuntu-orange?style=flat-square&logo=ubuntu&logoColor=white)
-![Status](https://img.shields.io/badge/Status-Production_Ready-green?style=flat-square)
-
-## What it does
-
-Tu deposes un brief de hackathon dans `inputs/`. Le pipeline installe ses prerequis, te pose quelques questions de config, lance un ultraplan avec 4 agents Opus dans le cloud, puis demarre 5 Agent Teams dans une session tmux. Les agents recherchent la concurrence, codent, auditent la securite, evaluent la qualite sur 50, et iterent sans limite jusqu'a ce que le score depasse 45/50 et que la securite passe. Tu supervises depuis Telegram ou `--watch`.
-
-```mermaid
-flowchart LR
-    A["./hackathon.sh"] --> B["Auto-setup\n(git, jq, tmux, gh, plugins)"]
-    B --> C["Config interactive\n(nom, deadline, telegram)"]
-    C --> D["Ultraplan\n(4 agents cloud, 30 min)"]
-    D --> E["Agent Teams tmux\n(5 agents Opus)"]
-    E --> F{"Score >= 45/50\n+ Security PASS?"}
-    F -- Non --> E
-    F -- Oui --> G["ZIP + push + notify"]
-```
 
 ## Quick Start
 
@@ -30,230 +14,260 @@ git clone https://github.com/Andy00L/hackathon-pipeline.git
 cd hackathon-pipeline
 chmod +x hackathon.sh
 
-# Deposer les fichiers du hackathon
-cp ~/Downloads/brief.pdf inputs/
-cp ~/Downloads/rules.md inputs/brief.md
+# Put the brief and any other material into inputs/
+cp ~/Downloads/brief.md inputs/brief.md
+cp ~/Downloads/rules.pdf inputs/
 
-# Lancer (le setup est automatique au premier lancement)
+# First run: auto-setup, interactive config, then pipeline
 ./hackathon.sh
 ```
 
-Le script detecte et installe automatiquement les outils manquants : git, curl, jq, tmux, zip, build-essential, GitHub CLI, et 5 plugins Claude Code.
+The first run installs missing tools (git, jq, tmux, zip, build-essential, GitHub CLI, 4 Claude Code plugins + the ui-ux-pro-max marketplace skill), configures passwordless sudo for `apt-get`/`mkdir`/`tee`/`chmod`, walks through an interactive config, then launches the orchestration mesh. Subsequent runs skip any step that's already done.
 
-## Prerequisites
+## What it does
 
-| Outil | Requis | Notes |
-|-------|--------|-------|
-| WSL2 (Ubuntu) | Oui | Le pipeline tourne sous Linux. Windows natif non supporte. |
-| Claude Max 20x | Oui | Abonnement necessaire pour les agents Opus. |
-| GitHub CLI (`gh`) | Auto-installe | Le pipeline l'installe si manquant. |
-| Claude Code CLI | Oui | Doit etre authentifie (`claude auth login`). |
-| Telegram Bot | Non | Recommande pour les notifications et le controle a distance. |
+1. Auto-installs prerequisites and authenticates Claude Code and GitHub CLI.
+2. Asks you 7 questions (name, deadline, theme, project directory, GitHub repo, Telegram bot token, chat ID) and writes `hackathon.conf`.
+3. Initializes a git repo and optionally a GitHub repo in `$PROJECT_DIR` (default `~/hackathons/<slug>`).
+4. Generates `CLAUDE.md` from `templates/CLAUDE.md.template`, copies `agents/` into `.claude/agents/`, writes `.claude/settings.json` with deny rules and 3 hooks, and copies the `ui-primitives/` starter kit.
+5. Prompts you to run `/ultraplan` manually in another terminal (skippable with `--skip-ultraplan`).
+6. Launches 6 tmux windows in a session named `hackathon`: one MCP server, one bootstrap, four long-running orchestrators (supervisor, delivery, security, quality).
+7. The orchestrators communicate through the MCP server's 8 tools, iterate on the code, and terminate when delivery reports DONE, security reports PASS, and quality reports READY on the same `HEAD` for 3 consecutive cycles.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    subgraph "Pipeline (hackathon.sh)"
-        A["auto_setup()"] --> B["interactive_config()"]
-        B --> C["load_config()"]
-        C --> D["git_init() + ensure_github()"]
-        D --> E["setup_safeguards()"]
-        E --> F["inject_claude_md()"]
-    end
-
-    subgraph "Agent Teams (tmux session)"
-        G["Lead (coordonne)"]
-        G --> H["Architecte\n(valide stack)"]
-        G --> I["Implementeur\n(code + tests)"]
-        G --> J["Securite\n(audit PASS/FAIL)"]
-        G --> K["Qualite\n(score /50)"]
-        G --> L["UX Designer\n(polish UI)"]
-    end
-
-    F --> G
-
-    subgraph "Surveillance"
-        M["Boucle watchdog\n(backoff exponentiel)"]
-        N["tmux pipe-pane\n(.pipeline-live.log)"]
-    end
-
-    G --> M
-    G --> N
+    A[./hackathon.sh] --> B[auto_setup]
+    B --> C[interactive_config]
+    C --> D[git_init + ensure_github]
+    D --> E[setup_safeguards<br/>3 hooks + deny rules]
+    E --> F[inject_claude_md<br/>+ inject_ui_primitives]
+    F --> G[optional: /ultraplan]
+    G --> H[Launch 6 tmux windows]
+    H --> I[Per-role watchdog<br/>30s cycle, exp backoff]
+    I --> J{Triple-ACK?<br/>delivery=DONE<br/>security=PASS<br/>quality=READY<br/>3 cycles on same SHA}
+    J -- no --> I
+    J -- yes --> K[Supervisor tags v1.0.0<br/>git archive ZIP<br/>push + Telegram notify]
 ```
 
-## Configuration
-
-Au premier lancement, `interactive_config()` pose les questions une par une. Les reponses sont sauvegardees dans `hackathon.conf`. Au lancement suivant, la config existante est proposee.
-
-| Variable | Requis | Default | Description |
-|----------|--------|---------|-------------|
-| `HACKATHON_NAME` | Oui | (aucun) | Nom du hackathon. Sert aussi a generer le slug du dossier projet. |
-| `HACKATHON_DEADLINE` | Non | (vide) | Format ISO : `2026-04-20T23:59:00` |
-| `HACKATHON_THEME` | Non | (vide) | Theme impose. Vide si libre. |
-| `PROJECT_DIR` | Non | `~/hackathons/<slug>` | Dossier du projet genere. Le slug est calcule depuis le nom. |
-| `GITHUB_REPO` | Non | (auto-cree) | Repo existant (`user/repo`). Si vide, `gh repo create` en cree un. |
-| `GITHUB_VISIBILITY` | Non | `public` | `public` ou `private` |
-| `TELEGRAM_BOT_TOKEN` | Non | (vide) | Token du bot Telegram. Cree via `@BotFather`. |
-| `TELEGRAM_CHAT_ID` | Non | (auto-detecte) | Detecte automatiquement si le token est valide. |
-| `CLAUDE_MODEL` | Non | `opus` | Modele Claude. |
-| `CLAUDE_EFFORT` | Non | `max` | Niveau d'effort. |
-| `CLAUDE_FALLBACK` | Non | `sonnet` | Modele de fallback. |
-
-Le `PROJECT_DIR` est automatiquement derive du nom du hackathon. Exemple : "Solana DeFi 2026" donne `~/hackathons/solana-defi-2026`. Le pipeline refuse de creer le projet a l'interieur de son propre repertoire.
-
-## CLI Options
-
-```bash
-./hackathon.sh                    # Pipeline complet (ultraplan + agents)
-./hackathon.sh --skip-ultraplan   # Skip ultraplan (si plan deja fait)
-./hackathon.sh --attach           # Attach a la session tmux existante
-./hackathon.sh --watch            # Logs filtres en temps reel
-./hackathon.sh --help             # Affiche l'aide
-```
-
-Le mode `--watch` filtre `.pipeline-live.log` pour n'afficher que les events significatifs : commits, verdicts PASS/FAIL/READY, scores, erreurs, et progressions de phase. Ctrl+C quitte le watch sans arreter la session tmux.
-
-## Les 5 agents
-
-Chaque agent a un fichier de definition dans `agents/` avec un frontmatter YAML (modele, outils, skills) et des instructions detaillees.
-
-| Agent | Modele | Role | Verdict |
-|-------|--------|------|---------|
-| **Architecte** | Opus | Valide chaque decision technique. 10 criteres en checklist. Recherche comparative via WebSearch. | VALIDE / CONCERN / BLOQUANT |
-| **Implementeur** | Sonnet | Code production-quality. Try/catch partout, timeouts 10s, retry x3. Fichiers < 300 lignes. | Commits atomiques |
-| **Securite** | Opus | Audit continu : secrets, injections, auth, deps, config. Suit le protocole REFERENCE en 9 phases. | PASS / FAIL |
-| **Qualite** | Opus | Evalue /50 sur 5 axes. Test from scratch, comparaison concurrence. Suit le protocole REFERENCE en 7 phases. | READY / NOT READY |
-| **UX Designer** | Opus | 6 phases : audit visuel, identite, composants, responsive, a11y, polish. Anti-AI-slop checklist. | Score polish /10 |
-
-Les agents Securite et Qualite disposent chacun d'un REFERENCE file (730+ lignes) qui definit un protocole d'audit professionnel multi-phases. Le Lead s'assure que ces protocoles sont suivis.
-
-## Pipeline flow detail
-
-### Phase 1 : Auto-setup
-
-`auto_setup()` est idempotent. Il verifie chaque outil et n'installe que le manquant :
-
-1. Paquets systeme : git, curl, jq, tmux, zip, build-essential
-2. GitHub CLI via le depot officiel
-3. Authentification GitHub (`gh auth login` si necessaire)
-4. Verification de Claude Code (`claude auth status`)
-5. Configuration NOPASSWD sudo
-6. 5 plugins Claude Code : frontend-design, security-guidance, code-review, feature-dev, ui-ux-pro-max
-
-### Phase 2 : Ultraplan
-
-4 agents Opus tournent 30 minutes dans le cloud. 3 explorers analysent en parallele, 1 critic challenge. Le plan est review dans un navigateur avec commentaires inline. Confirmation via Telegram ou Entree dans le terminal.
-
-### Phase 3 : Agent Teams
-
-5 agents dans une session tmux interactive. Le Lead coordonne, distribue le travail, et resout les conflits. La session est surveillee par un watchdog avec backoff exponentiel (60s, 120s, 240s, 300s max). Si la session crash, elle est relancee automatiquement. Apres 5 minutes de stabilite, le compteur de relance est reinitialise.
-
-### Terminaison
-
-Le pipeline s'arrete quand toutes ces conditions sont remplies :
-
-- Qualite : READY (score >= 45/50)
-- Securite : PASS
-- Documentation complete avec liens en ligne
-- Tests passent
-- Setup fonctionne from scratch
-- Archive ZIP creee, git tag v1.0.0, push final
-
-## Safeguards
-
-Le pipeline configure `.claude/settings.json` dans le projet avec deux couches de protection :
-
-**Deny rules** (commandes bloquees statiquement) :
-- `gh repo delete`, `gh repo archive`, `gh repo edit`
-- `git push --force`, `git push --force-with-lease`
-- `rm -rf /`, `rm -rf ~`, `rm -rf /*`
-
-**Hook PreToolUse** (inspection dynamique) :
-Chaque commande Bash est interceptee avant execution. Le hook extrait la commande via `jq`, verifie les patterns dangereux avec `grep`, et bloque si necessaire. Les acces au filesystem Windows (`/mnt/c/`, `/mnt/d/`, `/mnt/e/`) sont egalement bloques pour eviter les modifications hors WSL.
+The triple-ACK gate is what keeps the pipeline from finishing on a half-built submission. If any of the three verdicts goes stale because `HEAD` advanced, the stability counter resets to 0 and the mesh keeps iterating. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full protocol.
 
 ## Project structure
 
 ```
 hackathon-pipeline/
-├── hackathon.sh                 # Point d'entree (793 lignes, auto-setup + orchestration)
-├── hackathon.conf.example       # Template de config (11 variables)
-├── .gitignore                   # hackathon.conf, *.log, .ultraplan-done
-├── agents/
-│   ├── architecte.md            # Challenge les choix techniques (93 lignes)
-│   ├── implementeur.md          # Code production-quality (109 lignes)
-│   ├── securite.md              # Audit continu + PASS/FAIL (117 lignes)
-│   ├── qualite.md               # Evaluation /50 + READY/NOT READY (175 lignes)
-│   └── uiux-designer.md         # Design premium, anti-AI-slop (125 lignes)
+├── hackathon.sh                            # Entry point, 1537 lines
+├── hackathon.conf.example                  # Config template, 11 variables
+├── lib/
+│   ├── utils.sh                            # 231 lines, 7 functions
+│   └── telegram.sh                         # 98 lines, 3 functions
+├── mcp-coord/
+│   ├── server.py                           # 869 lines, 8 MCP tools
+│   ├── orchestrator_wrapper.py             # 352 lines, streaming loop
+│   ├── client_helper.py                    # 175 lines, used by PostToolUse hook
+│   ├── requirements.txt                    # mcp==1.27.0
+│   └── tests/                              # 24 tests, pytest
+├── .claude/
+│   ├── orchestrators/                      # 5 prompt files (bootstrap, supervisor, delivery, security, quality)
+│   └── settings.local.json                 # user-local permissions
+├── agents/                                 # 15 sub-agent definitions
 ├── templates/
-│   └── CLAUDE.md.template       # Instructions du pipeline, 9 phases (491 lignes)
-├── REFERENCE_SECURITY_AUDIT.md  # Protocole securite 9 phases (881 lignes)
-├── REFERENCE_DOCUMENTATION_AUDIT.md  # Protocole documentation 7 phases (729 lignes)
-└── inputs/                      # Deposer les fichiers du hackathon ici
+│   ├── CLAUDE.md.template                  # 764 lines, injected into the target project
+│   ├── hooks/                              # 3 hooks: pretooluse, posttooluse, precompact
+│   └── ui-primitives/                      # 9 primitives + globals.css + fonts.ts
+├── inputs/                                 # drop the brief here
+├── docs/
+│   └── PIPELINE-SMOKE-REPORT.md            # static-check + integration snapshot
+├── REFERENCE_SECURITY_AUDIT.md             # 729 lines, 9-phase protocol
+├── REFERENCE_DOCUMENTATION_AUDIT.md        # 881 lines, 7-phase protocol
+├── REFERENCE_PREMIUM_UI.md                 # 1487 lines, UI design protocol
+└── ARCHITECTURE.md                         # system design + sequence diagrams
 ```
 
-## Telegram setup
-
-1. Ouvre `@BotFather` sur Telegram
-2. `/newbot`, choisis un nom et username (doit finir par `bot`)
-3. Copie le token retourne
-4. Lance `./hackathon.sh`, le token est demande pendant la config interactive
-5. Le Chat ID est detecte automatiquement : envoie un message au bot, appuie sur Entree
-
-Si la detection echoue (timeout reseau, pas de message), le pipeline propose la saisie manuelle. Si le token est invalide, Telegram est desactive. Le pipeline fonctionne sans Telegram mais ne peut pas notifier.
-
-## Watch mode
+## CLI modes
 
 ```bash
-# Dans un terminal separe, pendant que le pipeline tourne :
-./hackathon.sh --watch
+./hackathon.sh                    # full pipeline (auto-setup, ultraplan, orchestration)
+./hackathon.sh --skip-ultraplan   # skip ultraplan, go straight to orchestration
+./hackathon.sh --attach           # attach to an existing tmux session, no setup
+./hackathon.sh --watch            # tail-f filtered live log, no setup
+./hackathon.sh --help             # usage
+DRY_RUN=1 ./hackathon.sh          # print the 6 tmux window commands and exit
 ```
 
-Le watch filtre le log tmux en temps reel. Seuls les events significatifs sont affiches : commits (`feat:`, `fix:`), verdicts (`PASS`, `FAIL`, `READY`), scores, erreurs, et changements de phase. Le log brut est dans `$PROJECT_DIR/.pipeline-live.log`.
+`--watch` tails `$PROJECT_DIR/.pipeline-live.log` and filters for the significant events (commits, PASS/FAIL/READY verdicts, scores, errors, phase changes, human-input markers). Ctrl+C quits the watch without stopping the tmux session.
+
+## Configuration
+
+Set in `hackathon.conf`. The interactive prompt writes this file on first run and proposes the existing values on subsequent runs. All values are shell-quoted; `_escape_conf_value()` in `hackathon.sh` escapes backslashes, dollar signs, backticks, and double quotes.
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `HACKATHON_NAME` | yes | (none) | Used for the project slug and log directory. |
+| `HACKATHON_DEADLINE` | no | (empty) | Free-form string, ISO 8601 recommended. |
+| `HACKATHON_THEME` | no | (empty) | Free-form. Passed to orchestrators via `CLAUDE.md`. |
+| `PROJECT_DIR` | no | `$HOME/hackathons/<slug>` | Refused if it resolves inside the pipeline repo. |
+| `GITHUB_REPO` | no | (auto-created) | Format `user/repo`. Empty → `gh repo create`. |
+| `GITHUB_VISIBILITY` | no | `public` | `public` or `private`. |
+| `TELEGRAM_BOT_TOKEN` | no | (empty) | Created via `@BotFather`. Empty disables Telegram. |
+| `TELEGRAM_CHAT_ID` | no | (auto-detected) | Detected from recent bot updates. |
+| `CLAUDE_MODEL` | no | `opus` | Must match `[a-zA-Z0-9._-]+`. |
+| `CLAUDE_EFFORT` | no | `max` | Must match `[a-zA-Z0-9._-]+`. |
+| `CLAUDE_FALLBACK` | no | `sonnet` | Declared but not currently referenced in `hackathon.sh`. |
+
+Runtime env vars read by Python:
+
+| Variable | Reader | Default |
+|---|---|---|
+| `PIPELINE_DIR` | `mcp-coord/server.py` | `<repo>/.pipeline` |
+| `REPO_ROOT` | `mcp-coord/server.py` | parent of `mcp-coord/` |
+| `CLAUDE_PROJECT_DIR` | `mcp-coord/client_helper.py`, hooks | caller's cwd |
+| `CLAUDE_SESSION_ID` | `templates/hooks/precompact-checkpoint.sh` | `unknown-<pid>` |
+
+## The 6-window tmux layout
+
+| Window | Process | Purpose |
+|---|---|---|
+| 0. `mcp` | `python3 mcp-coord/server.py` | stdio JSON-RPC coordination server |
+| 1. `bootstrap` | `claude --print` (one-shot) | Produces `notes/BRIEF-DISTILLED.md` and `notes/PACKAGES.md`, then exits |
+| 2. `supervisor` | `orchestrator_wrapper.py` | Pipeline lifecycle, dispatch, triple-ACK termination |
+| 3. `delivery` | `orchestrator_wrapper.py` | Writes code, tests, configs, README |
+| 4. `security` | `orchestrator_wrapper.py` | Audits every new SHA, writes `docs/SECURITY-AUDIT.md` |
+| 5. `quality` | `orchestrator_wrapper.py` | Scores /50, writes `docs/QUALITY-REPORT.md` |
+
+Each orchestrator runs in its own tmux pane. `orchestrator_wrapper.py` spawns `claude --print --input-format stream-json` as a subprocess and feeds it a "continue your cycle" message every 60 seconds. The wrapper writes an atomic heartbeat to `.pipeline/heartbeat/<role>.txt` on each cycle; the bash watchdog in `hackathon.sh` uses that to detect stalls.
+
+Session IDs are deterministic UUIDv5 per role (`uuid.uuid5(uuid.NAMESPACE_URL, "{role}.pipeline.hackathon")`), so `--resume` always finds the right session.
+
+## Sub-agents
+
+15 specialist agents live in `agents/`. Orchestrators spawn them via the `Agent` tool and aggregate their verdicts.
+
+| Agent | Model | Spawned by | Role |
+|---|---|---|---|
+| `architecte` | opus | delivery | 10-item architecture checklist, verdict VALID / CONCERN / BLOQUANT |
+| `implementeur` | sonnet | delivery | Writes code. Hard cap: 400 LOC, 8 files, 1 new dep per task |
+| `test-writer` | sonnet | delivery | Edge-case tests only (empty, null, oversized, unicode, negative, concurrent, network-down) |
+| `readme-specialist` | sonnet | delivery | Writes `README.md`, `docs/ARCHITECTURE.md`, `docs/DEMO.md` |
+| `docs-reader` | opus | bootstrap + on demand | Distills `inputs/*` into `notes/BRIEF-DISTILLED.md` |
+| `package-research` | opus | bootstrap + quality | Verifies dep versions via WebSearch + WebFetch |
+| `injection-specialist` | opus | security | OWASP A01/A03/A10: SQLi, XSS, command injection, path traversal, SSRF, XXE, open redirect, template injection |
+| `secrets-config-specialist` | opus | security | OWASP A05/A06: hardcoded credentials, .env hygiene, CORS, security headers, Dockerfile perms |
+| `auth-crypto-specialist` | opus | security | OWASP A02/A07: password hashing, JWT, session, RBAC, crypto primitives |
+| `deps-auditor` | opus | security (conditional) | Runs `npm audit` / `pip audit` / `cargo audit` when lockfiles change |
+| `threat-modeler` | opus | security (gate-time) | Produces `docs/THREAT-MODEL.md` with a Mermaid trust-boundary diagram |
+| `scratch-tester` | opus | quality | mktemp + clone + run Quick Start verbatim, times each command |
+| `code-quality-reviewer` | opus | quality | File size ≤300 LOC, complexity, dead code, lint, coverage |
+| `ui-quality-reviewer` | opus | quality | Polish, responsive 375-1440px, WCAG AA, anti-AI-slop checklist |
+| `docs-auditor` | opus | quality | Runs the 7-phase protocol from `REFERENCE_DOCUMENTATION_AUDIT.md` |
+
+Sub-agents cannot spawn sub-agents. They return structured verdicts; their context is discarded when they return. Only orchestrators interact with the MCP server.
+
+## MCP coordinator
+
+`mcp-coord/server.py` is a FastMCP stdio server that exposes 8 tools. All inter-orchestrator communication flows through it.
+
+| Tool | Semantics |
+|---|---|
+| `post_message(from, to, topic, payload, [message_id], [sha])` | Appends a JSON line to `.pipeline/inbox/<to>.jsonl`. Dedup by `message_id` within 24h. |
+| `claim_next(role)` | Atomically pops the oldest unclaimed message (flock + seek+truncate, O(n) I/O, O(1) RAM). |
+| `record_verdict(role, status, sha, [evidence], [findings])` | Appends to `.pipeline/verdicts.jsonl`. Status domain depends on role. |
+| `request_gate(gate_name)` | Reads the supervisor's cached gate decision from `.pipeline/state.json`. Returns `stale` if older than 300s. |
+| `get_latest_diff(since_ref)` | `git diff --unified=3 <since_ref>..HEAD`, truncated at 64 KiB. |
+| `acquire_file_lock(path, owner, [ttl_seconds])` | O_EXCL create in `.pipeline/locks/<sha1>.lock`. Default TTL 120s. Expired locks are taken over with an audit line. |
+| `release_file_lock(path, token)` | Token-verified. Audited. |
+| `heartbeat(role)` | Writes unix timestamp to `.pipeline/heartbeat/<role>.txt`. |
+
+The server uses `fcntl.flock` for inbox locking and `O_APPEND + fsync` for the JSONL stores. It writes its own log to `.pipeline/mcp-server.log` (file-only logging; stderr stays clear because the stdio channel carries JSON-RPC). More detail and file-layout diagrams in [mcp-coord/README.md](mcp-coord/README.md).
+
+## Safeguards
+
+`setup_safeguards()` writes `$PROJECT_DIR/.claude/settings.json` with three layers:
+
+**Static deny rules** (17 entries): `gh repo delete|archive|edit`, `git push --force` (3 variants, plus `git push origin --force`), `git reset --hard`, `rm -rf /`, `rm -rf ~`, `rm -rf /*`, `rm -rf .`, `rm -r -f *`, `chmod 777`, `chmod -R 777`, `mkfs.*`, `dd if=*`.
+
+**Three hooks** in `templates/hooks/`:
+
+| Hook | Event | Behavior |
+|---|---|---|
+| `pretooluse-safeguard.sh` | PreToolUse (matcher: Bash) | Parses `.tool_input.command`, denies on 12 dangerous regexes + `/mnt/[a-z]/` Windows access. Fails closed if `jq` is missing. |
+| `posttooluse-fanout.sh` | PostToolUse (matcher: Edit\|Write\|MultiEdit) | If the write landed in `src/`, `tests/`, or a buildfile, posts `review_diff` to security and `new_feature` to quality via `client_helper.py`. Debounced 30s per SHA. |
+| `precompact-checkpoint.sh` | PreCompact | Writes `.pipeline/checkpoint/<role>.md` with last SHA, inbox count, and last 5 verdicts before Claude Code compacts the conversation. |
+
+**Watchdog recovery**: the bash loop at the bottom of `hackathon.sh` cycles every 30s. For each orchestrator role, it checks window liveness, pane exit code, and heartbeat freshness (<120s after a 60s grace period). On failure it respawns via `orchestrator_wrapper.py` which uses `--resume` when a log exists. Backoff ladder: 30 → 60 → 120 → 300s, reset to 30s after 5 consecutive minutes of stability. Exit code 42 (context-pressure checkpoint) triggers an immediate respawn with no backoff.
+
+## Telegram
+
+Optional. Used for progress notifications and the `HUMAN_INPUT_NEEDED` escalation path.
+
+1. Open `@BotFather`, `/newbot`, copy the token.
+2. Send any message to the bot (required so its first update carries your chat ID).
+3. Run `./hackathon.sh`. When asked, paste the token; press Enter when prompted and the pipeline calls `getUpdates` to detect the chat ID automatically (3 retries with manual fallback).
+
+If the token is invalid, `tg_init()` in `lib/telegram.sh` logs a warning and sets `TELEGRAM_ENABLED=false`. `tg_send` becomes a no-op; nothing else breaks.
+
+The watchdog checks `docs/STATUS.md` every 3 cycles (~90s) for a `## HUMAN_INPUT_NEEDED` block. If the block's sha1 has changed since the last send, the watchdog sanitizes known API-key prefixes (`hc_live_`, `sk-`, `ghp_`, `xox[bpsa]-`, `glpat-`, `AKIA`), truncates to 3800 bytes (Telegram's limit is 4096), and forwards to the chat.
+
+## Tests
+
+```bash
+cd mcp-coord
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+python3 -m pytest tests -q
+# 24 passed in ~4s
+```
+
+23 unit tests in `tests/test_server.py` cover round-trip messaging, dedup, verdict ordering, role/topic/status validation, lock contention and TTL, path traversal rejection, and wrong-token rejection. 1 integration test in `tests/test_integration.py` walks a `post_message → claim_next → record_verdict` round-trip. Full report in [docs/PIPELINE-SMOKE-REPORT.md](docs/PIPELINE-SMOKE-REPORT.md).
 
 ## Known limitations
 
-- **lib/ manquant** : `hackathon.sh` source `lib/utils.sh` et `lib/telegram.sh`. Ces fichiers doivent exister dans le repo. Si absents, le pipeline crash au demarrage.
-- **WSL2 only** : Le pipeline utilise `apt-get`, `dpkg`, et des chemins Linux. Pas de support macOS ou Windows natif.
-- **Claude Max requis** : Les agents Opus consomment du quota. Sur un plan gratuit ou Pro, les limites seront atteintes rapidement.
-- **Session tmux unique** : Un seul hackathon peut tourner a la fois (session nommee `hackathon`).
-- **Pas de resume intelligent** : Si la session crash et est relancee, le prompt de recovery demande aux agents de relire CLAUDE.md et le git log. Le contexte conversationnel est perdu.
-- **Plugins Claude Code** : Les plugins (`frontend-design`, `security-guidance`, etc.) peuvent ne pas etre disponibles ou changer de nom. L'installation echoue silencieusement si un plugin est introuvable.
+- **Linux / WSL2 only.** `mcp-coord/server.py` imports `fcntl` at module top and refuses to start on Windows natively. `auto_setup` uses `apt-get`, `dpkg`, and Ubuntu package names.
+- **One pipeline per machine.** Only one tmux session named `hackathon` is supported; a lock file at `$PROJECT_DIR/.pipeline.lock` prevents two concurrent `./hackathon.sh` invocations.
+- **Claude plugin availability.** `auto_setup` calls `claude plugin install` for 4 plugins + 1 marketplace skill. If a plugin has been renamed or removed upstream, installation logs a `~` and continues; orchestrators that rely on `ui-ux-pro-max` will still run but may skip some stylistic checks.
+- **No state resume across machines.** Session UUIDs are deterministic per role but `--resume` reads Claude Code's local conversation store. Moving the repo to another machine starts the orchestrators fresh.
+- **Bootstrap is one-shot.** If `notes/BRIEF-DISTILLED.md` or `notes/PACKAGES.md` is damaged mid-run, the watchdog will not respawn bootstrap. Delete them and restart the pipeline.
+- **Python venv detection is narrow.** `hackathon.sh` prefers `mcp-coord/.venv/bin/python3`, falls back to system `python3` if it can `import mcp`, otherwise exits. A stale venv that has the binary but not the `mcp` module will fail the import check.
+- **`cli.github.com/packages` returned 404** in the last smoke test (see `docs/PIPELINE-SMOKE-REPORT.md`). The APT source still works; the human-readable index page is gone.
 
-## Troubleshooting
+## Documentation
 
-**La session tmux a disparu**
-Le watchdog la relance automatiquement avec backoff exponentiel. Pour verifier : `tmux ls`. Pour relancer manuellement : `./hackathon.sh --skip-ultraplan`.
-
-**Rate limit atteint**
-Claude attend et reprend. Sur Max 20x, les limites sont rarement atteintes. Active "extra usage" dans les settings Claude si necessaire.
-
-**Claude demande un mot de passe sudo**
-Relance `./hackathon.sh`. `auto_setup()` configure NOPASSWD au premier lancement.
-
-**Le setup echoue**
-Verifie que Claude Code est authentifie : `claude auth status`. Verifie GitHub : `gh auth status`.
-
-**Pas de notification Telegram**
-Verifie le token : `curl -s "https://api.telegram.org/bot<TOKEN>/getMe"`. Si le JSON retourne `"ok": false`, le token est invalide. Recree un bot via `@BotFather`.
+| File | What's in it |
+|---|---|
+| [README.md](README.md) | This file. Overview, Quick Start, config reference. |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System design, MCP protocol, message topics, sole-writer table, triple-ACK termination, watchdog state machine. |
+| [mcp-coord/README.md](mcp-coord/README.md) | MCP server setup, tool reference, `.pipeline/` layout. |
+| [REFERENCE_SECURITY_AUDIT.md](REFERENCE_SECURITY_AUDIT.md) | 9-phase security audit protocol used by the security orchestrator. |
+| [REFERENCE_DOCUMENTATION_AUDIT.md](REFERENCE_DOCUMENTATION_AUDIT.md) | 7-phase documentation audit protocol used by `docs-auditor`. |
+| [REFERENCE_PREMIUM_UI.md](REFERENCE_PREMIUM_UI.md) | UI design reference used by `ui-quality-reviewer`. |
+| [templates/CLAUDE.md.template](templates/CLAUDE.md.template) | 764-line contract injected into the target project as `CLAUDE.md`. |
+| [templates/ui-primitives/README.md](templates/ui-primitives/README.md) | Starter-kit primitives and extension rules. |
+| [templates/ui-primitives/DESIGN-PRINCIPLES.md](templates/ui-primitives/DESIGN-PRINCIPLES.md) | Color tokens, easing curves, anti-AI-slop patterns. |
+| [docs/PIPELINE-SMOKE-REPORT.md](docs/PIPELINE-SMOKE-REPORT.md) | Latest static-check, unit-test, hook, MCP, and dry-run results. |
 
 ## Contributing
 
 ```bash
-# Clone et branche
-git clone https://github.com/Andy00L/hackathon-pipeline.git
-cd hackathon-pipeline
-git checkout -b feature/ma-feature
+git checkout -b fix/your-thing
 
-# Verifier la syntaxe apres modification
+# syntax checks
 bash -n hackathon.sh
+bash -n lib/utils.sh
+bash -n lib/telegram.sh
+shellcheck --severity=warning hackathon.sh templates/hooks/*.sh
 
-# Tester
-./hackathon.sh --help
+# unit tests
+source mcp-coord/.venv/bin/activate
+python3 -m pytest mcp-coord/tests -q
+
+# dry-run the launcher (prints window commands, no tmux)
+DRY_RUN=1 ./hackathon.sh
 ```
 
-Les fichiers agents (`agents/*.md`) suivent un format strict : frontmatter YAML + instructions structurees avec checklists, commandes bash, et formats de sortie. Voir `agents/securite.md` comme reference du niveau de detail attendu.
+`agents/*.md` files all start with YAML frontmatter (`name`, `description`, `model`, `effort`, `maxTurns`, `permissionMode`, `tools`, optional `skills`). See `agents/architecte.md` for the current template. The check at `hackathon.sh:984` refuses to launch if fewer than 15 files are present in `agents/`.
 
 ## License
 
-MIT
+MIT (declared in README badge; no `LICENSE` file is currently committed, which is a gap).
