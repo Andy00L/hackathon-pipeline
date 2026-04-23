@@ -1288,6 +1288,26 @@ graceful_shutdown() {
 # Switch from launch-phase trap to watchdog trap
 trap graceful_shutdown SIGINT SIGTERM
 
+# Redact common secret patterns before forwarding to external channels.
+# Not exhaustive — defense in depth, not sole defense. The upstream
+# prompt rule "no secrets in STATUS.md" is the primary guard.
+_redact_secrets() {
+  local input="$1"
+  # API key prefixes we know (extend as needed):
+  input=$(printf '%s' "$input" | sed -E '
+    s/(hc_live_[A-Za-z0-9_]{4})[A-Za-z0-9_]{8,}([A-Za-z0-9_]{4})/\1…REDACTED…\2/g
+    s/(hc_test_[A-Za-z0-9_]{4})[A-Za-z0-9_]{8,}([A-Za-z0-9_]{4})/\1…REDACTED…\2/g
+    s/(sk-[A-Za-z0-9_]{4})[A-Za-z0-9_]{8,}([A-Za-z0-9_]{4})/\1…REDACTED…\2/g
+    s/(ghp_[A-Za-z0-9]{4})[A-Za-z0-9]{8,}([A-Za-z0-9]{4})/\1…REDACTED…\2/g
+    s/(pk_[A-Za-z0-9_]{4})[A-Za-z0-9_]{8,}([A-Za-z0-9_]{4})/\1…REDACTED…\2/g
+    s/(xox[bpsa]-[A-Za-z0-9-]{4})[A-Za-z0-9-]{8,}([A-Za-z0-9-]{4})/\1…REDACTED…\2/g
+    s/(glpat-[A-Za-z0-9_-]{4})[A-Za-z0-9_-]{8,}([A-Za-z0-9_-]{4})/\1…REDACTED…\2/g
+    s/(AKIA[A-Z0-9]{4})[A-Z0-9]{8,}([A-Z0-9]{4})/\1…REDACTED…\2/g
+    s/([A-Z_]*(SECRET|TOKEN|PASSWORD|APIKEY|API_KEY)[A-Z_]*[[:space:]]*=[[:space:]]*)([^[:space:]]+)/\1***REDACTED***/gi
+  ')
+  printf '%s' "$input"
+}
+
 # ── Per-role watchdog with exponential backoff ────────────────────────────────
 # Every 30s: check each role's window, pane liveness, and heartbeat freshness.
 # Respawn dead roles via claude --resume. Backoff: 30 → 60 → 120 → 300s.
@@ -1322,6 +1342,69 @@ while true; do
     log "ERROR" "tmux session '${TMUX_SESSION}' gone — exiting watchdog"
     break
   fi
+
+  # ── Forward new HUMAN_INPUT_NEEDED to Telegram (every 3 cycles) ──────────
+  # Debounce: check every 3rd watchdog cycle (~90s at 30s cycle).
+  # Content-hash-based dedup: only forward when the HUMAN_INPUT_NEEDED
+  # section has changed since last send.
+  # Baseline: on first check (no hash file), record hash but don't send
+  # (avoid dumping the full file on init).
+  # Sanitization: secrets redacted before send. Primary guard remains the
+  # orchestrator prompts ("never put secrets in STATUS.md"); this is
+  # defense in depth for known API-key prefixes only.
+  # Rate: max 1 Telegram message per 90s by construction — well under
+  # Telegram's 1 msg/sec/chat limit.
+  if [[ "${TELEGRAM_ENABLED:-false}" == "true" ]]; then
+    : "${_wd_cycle:=0}"
+    _wd_cycle=$((_wd_cycle + 1))
+    if (( _wd_cycle % 3 == 0 )); then
+      _status_file="${PROJECT_DIR}/docs/STATUS.md"
+      _hash_file="${PROJECT_DIR}/.pipeline/last-human-input-hash"
+      if [[ -f "$_status_file" ]]; then
+        # Extract the HUMAN_INPUT_NEEDED section (from its header to
+        # the next "## " header or EOF).
+        _block=$(awk '
+          /^## HUMAN_INPUT_NEEDED/{flag=1; next}
+          /^## /{if(flag) exit}
+          flag {print}
+        ' "$_status_file" | sed '/^[[:space:]]*$/d') || _block=""
+
+        if [[ -n "$_block" ]]; then
+          _hash=$(printf '%s' "$_block" | sha1sum 2>/dev/null | awk '{print $1}') || _hash=""
+          _prev_hash=$(cat "$_hash_file" 2>/dev/null || echo "")
+
+          if [[ -z "$_prev_hash" ]]; then
+            # First-ever check — baseline only, do not send.
+            echo "$_hash" > "$_hash_file" 2>/dev/null || true
+            log "INFO" "Telegram HUMAN_INPUT baseline recorded"
+          elif [[ "$_hash" != "$_prev_hash" ]]; then
+            # Content changed — sanitize + truncate + send.
+            _sanitized=$(_redact_secrets "$_block")
+            # Truncate to 3800 bytes (leaves headroom under Telegram's
+            # 4096-char sendMessage limit). head -c is byte-based; a
+            # multi-byte UTF-8 char at the boundary may be cut mid-
+            # sequence — acceptable since the "truncated" notice makes
+            # any garbled tail visible rather than silent.
+            _truncated=$(printf '%s' "$_sanitized" | head -c 3800)
+            if [[ "${#_sanitized}" -gt 3800 ]]; then
+              _truncated="${_truncated}
+
+…(truncated; see docs/STATUS.md on the host for full details)"
+            fi
+            _message="⚠️ HUMAN INPUT NEEDED (${HACKATHON_NAME:-pipeline})
+
+${_truncated}"
+            # tg_send is graceful — failures don't crash watchdog.
+            tg_send "$_message" 2>/dev/null || \
+              log "WARN" "Telegram forward failed (network? rate?); will retry next cycle"
+            echo "$_hash" > "$_hash_file" 2>/dev/null || true
+          fi
+          # else: unchanged; no action
+        fi
+      fi
+    fi
+  fi
+  # ─────────────────────────────────────────────────────────────────────────
 
   # ── MCP server (check first — orchestrators depend on it) ──────────────
   if ! check_window_alive "mcp" || check_pane_dead "mcp"; then
