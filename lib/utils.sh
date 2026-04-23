@@ -208,6 +208,7 @@ inject_claude_md() {
   # Copy REFERENCE files to project docs/
   mkdir -p "${PROJECT_DIR}/docs"
   cp "${pipeline_dir}/REFERENCE_SECURITY_AUDIT.md" "${PROJECT_DIR}/docs/" 2>/dev/null || true
+  cp "${pipeline_dir}/REFERENCE_PREMIUM_UI.md" "${PROJECT_DIR}/docs/" 2>/dev/null || true
   cp "${pipeline_dir}/REFERENCE_DOCUMENTATION_AUDIT.md" "${PROJECT_DIR}/docs/" 2>/dev/null || true
 
   log "INFO" "CLAUDE.md généré dans ${PROJECT_DIR}"
