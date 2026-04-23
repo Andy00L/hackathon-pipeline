@@ -75,3 +75,17 @@ Return:
 - 7/10: Good design, minor inconsistencies, most states present
 - 4/10: Functional but visibly a prototype, missing states
 - 1/10: Broken UI, placeholder content, no design effort
+
+## Starter-kit enforcement
+Before scoring Polish axis, verify:
+- `ui-primitives/` directory exists in the project root.
+- At least 5 primitive files exist under `ui-primitives/primitives/`.
+- `src/` does NOT contain duplicate implementations of primitives
+  already in `ui-primitives/` (e.g. a custom `src/components/Button.tsx`
+  when `ui-primitives/primitives/Button.tsx` exists).
+- `styles/globals.css` (or the project's main global CSS) either IS
+  `ui-primitives/styles/globals.css` or extends it via `@import`.
+
+Auto-deduct 2 Polish points per violation. Cite each violation in
+the report and include the file path responsible. Reference
+`ui-primitives/DESIGN-PRINCIPLES.md` when suggesting fixes.

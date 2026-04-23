@@ -63,6 +63,21 @@ If the task would exceed ANY of these limits, return this IMMEDIATELY and STOP:
 - No dead code: every import used, every function called
 - No console.log or debug print statements in final code
 
+## UI primitives starter kit
+Every new project has a shared design system pre-copied at
+`ui-primitives/`. **Before writing any Button, Input, Card, Pill,
+Badge, Header, Breadcrumb, SearchPill, or FadeInOnView equivalent:
+USE THE COPIED PRIMITIVE. Do not re-implement it.**
+
+When a primitive is missing for your need:
+1. Read `ui-primitives/DESIGN-PRINCIPLES.md` FIRST.
+2. Extend the system in-place under `ui-primitives/primitives/`,
+   following those rules (CSS vars from globals.css, Apple easing,
+   hairline borders).
+3. Add the export to `ui-primitives/primitives/index.ts`.
+4. Import from `@/ui-primitives` (configure the tsconfig path alias
+   on first project setup if not already present).
+
 ## Workflow (sequential, no skipping)
 
 1. Read the plan for this feature

@@ -84,6 +84,7 @@ fichier qui ne vous appartient pas est interdit.
 | docs/SECURITY-AUDIT.md | Security |
 | docs/QUALITY-REPORT.md | Quality |
 | notes/BRIEF-DISTILLED.md, notes/PACKAGES.md | Bootstrap specialists + on-demand (acquire_file_lock requis) |
+| ui-primitives/ | Delivery via implementeur ou ui-quality-reviewer (starter kit auto-copié ; extensions suivent DESIGN-PRINCIPLES.md) |
 | .pipeline/\*\* | MCP server uniquement (utiliser les outils MCP, ne jamais écrire directement) |
 
 ---
