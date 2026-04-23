@@ -794,6 +794,67 @@ if [[ -f "$LOCK_FILE" ]]; then
 fi
 echo $$ > "$LOCK_FILE"
 
+# ── Orphan process sweep (defensive, narrow) ─────────────────────────────
+# Prior failed runs may have left wrappers attached to dead tmux windows.
+# This block kills ONLY processes matching our pipeline's specific cmdline
+# patterns, and ONLY when we're certain no live tmux session owns them.
+#
+# Safety gates (all must be true):
+#   1. Not in --attach mode (user is connecting to an existing session).
+#   2. Not in --watch mode (user is observing an existing session).
+#   3. No tmux session named "${TMUX_SESSION}" is alive (if one exists,
+#      someone else or our own prior launch is running; do NOT sweep).
+#   4. The wrapper cmdline pattern includes the full absolute path to
+#      THIS pipeline's mcp-coord/orchestrator_wrapper.py (so we don't
+#      kill wrappers belonging to a different checkout of this repo).
+#   5. Only current user's processes (pgrep -U "$(id -u)").
+#
+# If any gate fails, we SKIP the sweep. A few orphans are harmless;
+# killing the wrong process is not.
+
+if [[ "${ATTACH_MODE:-false}" == "false" ]] \
+  && [[ "${WATCH_MODE:-false}" == "false" ]] \
+  && ! tmux has-session -t "${TMUX_SESSION}" 2>/dev/null
+then
+  # Build the precise pattern: absolute path + file name.
+  wrapper_pattern="${SCRIPT_DIR}/mcp-coord/orchestrator_wrapper.py"
+  server_pattern="${SCRIPT_DIR}/mcp-coord/server.py"
+
+  # Enumerate orphans (current user only, absolute-path match):
+  orphan_wrappers=$(pgrep -U "$(id -u)" -f "${wrapper_pattern}" 2>/dev/null || true)   # target: orchestrator_wrapper.py
+  orphan_servers=$(pgrep -U "$(id -u)" -f "${server_pattern}" 2>/dev/null || true)     # target: server.py
+
+  orphan_total=$(printf '%s\n%s\n' "$orphan_wrappers" "$orphan_servers" \
+    | grep -c . || true)
+
+  if (( orphan_total > 0 )); then
+    log "INFO" "Found ${orphan_total} orphaned pipeline process(es) from a prior run"
+    # Graceful first: SIGTERM, 5s grace
+    if [[ -n "$orphan_wrappers" ]]; then
+      log "INFO" "Sending SIGTERM to wrapper PIDs: $(echo "$orphan_wrappers" | tr '\n' ' ')"
+      kill -TERM $orphan_wrappers 2>/dev/null || true
+    fi
+    if [[ -n "$orphan_servers" ]]; then
+      log "INFO" "Sending SIGTERM to server PIDs: $(echo "$orphan_servers" | tr '\n' ' ')"
+      kill -TERM $orphan_servers 2>/dev/null || true
+    fi
+    sleep 5
+
+    # Any still alive → SIGKILL (last resort)
+    still_wrappers=$(pgrep -U "$(id -u)" -f "${wrapper_pattern}" 2>/dev/null || true)
+    still_servers=$(pgrep -U "$(id -u)" -f "${server_pattern}" 2>/dev/null || true)
+    if [[ -n "$still_wrappers" || -n "$still_servers" ]]; then
+      log "WARN" "Some orphans ignored SIGTERM; sending SIGKILL"
+      [[ -n "$still_wrappers" ]] && kill -KILL $still_wrappers 2>/dev/null || true
+      [[ -n "$still_servers" ]] && kill -KILL $still_servers 2>/dev/null || true
+    fi
+    log "INFO" "Orphan sweep complete"
+  fi
+else
+  log "INFO" "Orphan sweep skipped (attach/watch mode, or tmux session alive)"
+fi
+# ─────────────────────────────────────────────────────────────────────────
+
 echo ""
 echo "════════════════════════════════════════════════════"
 echo "  Pipeline hackathon : ${HACKATHON_NAME}"
