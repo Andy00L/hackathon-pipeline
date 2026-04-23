@@ -52,7 +52,16 @@
       "Bash([[ -f \"$PROJECT_SETTINGS\" ]])",
       "Bash(jq '.permissions.allow = \\(\\(.permissions.allow // []\\) + [\"mcp__pipeline-coordinator__*\"] | unique\\)' /home/drew/hackathons/drawbridge/.claude/settings.json)",
       "Bash(mv /home/drew/hackathons/drawbridge/.claude/settings.json.tmp /home/drew/hackathons/drawbridge/.claude/settings.json)",
-      "WebFetch(domain:ui.shadcn.com)"
+      "WebFetch(domain:ui.shadcn.com)",
+      "Bash(awk '/reconcile state/{r=NR} /Stale-verdict detection/{s=NR} /route work/{w=NR} *)",
+      "Bash(exit 1)",
+      "Bash(awk '/reconcile state/{print \"reconcile state -> line\", NR} /Stale-verdict detection/{print \"Stale-verdict detection -> line\", NR} /route work/{print \"route work -> line\", NR}' .claude/orchestrators/supervisor.prompt.md)",
+      "Read(//home/drew/.claude/**)",
+      "Read(//home/drew/hackathons/drawbridge/.claude/**)",
+      "Bash(set +e)",
+      "WebFetch(domain:core.telegram.org)",
+      "Bash(awk '/^while true; do$/{flag=1; start=NR} flag && /^done$/{print \"Loop ends at line \"NR\" \\(starts \"start\"\\)\"; exit}' /home/drew/pipeline_hack/hackathon.sh)",
+      "Bash(echo \"--- exit $? ---\")"
     ]
   }
 }
